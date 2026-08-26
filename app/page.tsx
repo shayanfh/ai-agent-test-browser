@@ -27,6 +27,7 @@ export default function Home() {
   const triggerFramesRef = useRef(0);
   const silenceFramesRef = useRef(0);
   const voicedFramesRef = useRef(0);
+  const noiseFloorRef = useRef(0.004);
   const listenAfterRef = useRef(0);
   const audioRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
@@ -82,6 +83,7 @@ export default function Home() {
         switch (event.type) {
           case 'stt_partial': setTranscript(event.text || 'Listening…'); setMetrics((m) => ({ ...m, firstPartial: m.firstPartial ?? event.first_partial_ms })); break;
           case 'stt_final': setTranscript(event.text || 'No speech detected'); setMetrics((m) => ({ ...m, speechDuration: event.speech_duration_ms, sttFinal: event.stt_final_ms })); setStatus('thinking'); break;
+          case 'stt_ignored': setTranscript('Listening for speech…'); setError(''); listenAfterRef.current = performance.now() + 350; setStatus('ready'); break;
           case 'llm_token': setAnswer((text) => text + event.delta); setMetrics((m) => ({ ...m, ttft: m.ttft ?? event.ttft_ms })); break;
           case 'llm_done': setMetrics((m) => ({ ...m, tokensPerSecond: event.tokens_per_second, llmTotal: event.total_ms })); break;
           case 'tts_audio': setMetrics((m) => ({ ...m, ttsFirstAudio: m.ttsFirstAudio ?? event.ttfa_ms, ttsRealtime: event.realtime_factor })); break;
@@ -126,10 +128,14 @@ export default function Home() {
       }
 
       if (!recordingRef.current) {
+        if (rms < Math.max(0.03, noiseFloorRef.current * 3)) {
+          noiseFloorRef.current = noiseFloorRef.current * 0.94 + rms * 0.06;
+        }
         preRollRef.current.push(pcm);
         if (preRollRef.current.length > 4) preRollRef.current.shift();
-        triggerFramesRef.current = rms >= 0.018 ? triggerFramesRef.current + 1 : 0;
-        if (triggerFramesRef.current < 2) return;
+        const startThreshold = Math.max(0.016, noiseFloorRef.current * 3.2);
+        triggerFramesRef.current = rms >= startThreshold ? triggerFramesRef.current + 1 : 0;
+        if (triggerFramesRef.current < 3) return;
 
         recordingRef.current = true;
         triggerFramesRef.current = 0;
@@ -151,7 +157,8 @@ export default function Home() {
       }
 
       socket.send(pcm);
-      if (rms >= 0.012) {
+      const continueThreshold = Math.max(0.009, noiseFloorRef.current * 1.7);
+      if (rms >= continueThreshold) {
         voicedFramesRef.current += 1;
         silenceFramesRef.current = 0;
       } else {
@@ -193,6 +200,7 @@ export default function Home() {
       await prepareMicrophone();
       await audioRef.current?.resume();
       callActiveRef.current = true;
+      noiseFloorRef.current = 0.004;
       setCallActive(true);
       listenAfterRef.current = performance.now() + 250;
       setTranscript('Call active — start speaking naturally.');

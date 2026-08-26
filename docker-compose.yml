@@ -58,7 +58,7 @@ services:
       PIPER_URL: http://piper:5000
       MODEL_NAME: gemma-3-1b-it
       MAX_TOKENS: "${MAX_TOKENS:-160}"
-      MOONSHINE_VAD_THRESHOLD: "${MOONSHINE_VAD_THRESHOLD:-0}"
+      MOONSHINE_VAD_THRESHOLD: "${MOONSHINE_VAD_THRESHOLD:-0.35}"
       XDG_CACHE_HOME: /models/cache
       HF_HOME: /models/huggingface
       SYSTEM_PROMPT: "${SYSTEM_PROMPT:-You are a concise voice assistant. Reply naturally in one to three short sentences. Avoid markdown.}"

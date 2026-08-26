@@ -30,10 +30,10 @@ MODEL_NAME = os.getenv("MODEL_NAME", "gemma-3-1b-it")
 async def lifespan(app: FastAPI):
     log.info("Loading Moonshine Tiny Streaming")
     model_path, model_arch = get_model_for_language("en", ModelArch.TINY_STREAMING)
-    # Push-to-talk already gives us exact utterance boundaries. Disabling VAD
-    # prevents quiet microphones from discarding an otherwise valid turn.
+    # Browser-side VAD provides utterance boundaries; Moonshine's moderately
+    # permissive VAD remains enabled as a second guard against room noise.
     options = {
-        "vad_threshold": os.getenv("MOONSHINE_VAD_THRESHOLD", "0"),
+        "vad_threshold": os.getenv("MOONSHINE_VAD_THRESHOLD", "0.35"),
         "vad_max_segment_duration": "120",
     }
     debug_audio_path = os.getenv("MOONSHINE_DEBUG_AUDIO_PATH", "").strip()
@@ -199,6 +199,17 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
         else:
             message = f"Audio arrived (peak {turn.peak:.2f}, RMS {rms:.3f}) but Moonshine produced no English transcript. Try a clear English sentence."
         await send_json(websocket, lock, {"type": "error", "stage": "stt", "message": message})
+        return
+    duration = turn.audio_samples / 16000
+    rms = math.sqrt(turn.energy_sum / max(1, turn.audio_samples))
+    normalized = re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
+    common_silence_hallucinations = {
+        "thank you", "thanks", "thank you for watching", "thanks for watching",
+        "bye", "goodbye", "you", "the end",
+    }
+    if rms < 0.007 or duration < 0.55 or (normalized in common_silence_hallucinations and rms < 0.022):
+        log.info("Ignoring probable silence hallucination text=%r duration=%.2f rms=%.4f peak=%.3f", text, duration, rms, turn.peak)
+        await send_json(websocket, lock, {"type": "stt_ignored", "text": text, "reason": "low_energy", "audio_rms": rms, "audio_peak": turn.peak})
         return
     # Keep complete user/assistant pairs. Trimming after appending the new user
     # can leave an assistant message at the front, which Gemma rejects as an
