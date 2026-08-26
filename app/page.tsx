@@ -13,19 +13,29 @@ function Metric({ label, value, unit = 'ms' }: { label: string; value?: number; 
 
 export default function Home() {
   const [status, setStatus] = useState<Status>('connecting');
-  const [transcript, setTranscript] = useState('Press and hold the button, then start speaking.');
+  const [transcript, setTranscript] = useState('Start a call, then speak naturally.');
   const [answer, setAnswer] = useState('');
   const [metrics, setMetrics] = useState<Metrics>(emptyMetrics);
   const [error, setError] = useState('');
   const [level, setLevel] = useState(0);
+  const [callActive, setCallActive] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const recordingRef = useRef(false);
+  const callActiveRef = useRef(false);
+  const statusRef = useRef<Status>('connecting');
+  const preRollRef = useRef<ArrayBuffer[]>([]);
+  const triggerFramesRef = useRef(0);
+  const silenceFramesRef = useRef(0);
+  const voicedFramesRef = useRef(0);
+  const listenAfterRef = useRef(0);
   const audioRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
   const playbackAtRef = useRef(0);
   const streamRef = useRef<MediaStream | null>(null);
   const speechEndRef = useRef(0);
   const receivedFirstAudioRef = useRef(false);
+
+  useEffect(() => { statusRef.current = status; }, [status]);
 
   const playAudio = useCallback(async (data: ArrayBuffer) => {
     const context = audioRef.current;
@@ -44,8 +54,15 @@ export default function Home() {
         setMetrics((m) => ({ ...m, total: decodeAndNetworkMs + scheduledDelayMs }));
       }
       playbackAtRef.current = at + buffer.duration;
+      statusRef.current = 'speaking';
       setStatus('speaking');
-      source.onended = () => { if (context.currentTime >= playbackAtRef.current - 0.05) setStatus('ready'); };
+      source.onended = () => {
+        if (context.currentTime >= playbackAtRef.current - 0.05) {
+          listenAfterRef.current = performance.now() + 500;
+          statusRef.current = 'ready';
+          setStatus('ready');
+        }
+      };
     } catch { setError('The browser could not decode the returned audio.'); setStatus('error'); }
   }, []);
 
@@ -57,7 +74,7 @@ export default function Home() {
       socket.binaryType = 'arraybuffer';
       socketRef.current = socket;
       socket.onopen = () => { setStatus('ready'); setError(''); };
-      socket.onclose = () => { if (socketRef.current === socket) { setStatus('connecting'); retry = setTimeout(connect, 1500); } };
+      socket.onclose = () => { if (socketRef.current === socket) { callActiveRef.current = false; setCallActive(false); setStatus('connecting'); retry = setTimeout(connect, 1500); } };
       socket.onerror = () => setError('Cannot reach the voice backend. Reconnecting…');
       socket.onmessage = (message) => {
         if (message.data instanceof ArrayBuffer) { void playAudio(message.data); return; }
@@ -69,7 +86,7 @@ export default function Home() {
           case 'llm_done': setMetrics((m) => ({ ...m, tokensPerSecond: event.tokens_per_second, llmTotal: event.total_ms })); break;
           case 'tts_audio': setMetrics((m) => ({ ...m, ttsFirstAudio: m.ttsFirstAudio ?? event.ttfa_ms, ttsRealtime: event.realtime_factor })); break;
           case 'turn_done': setStatus((s) => s === 'speaking' ? s : 'ready'); break;
-          case 'error': setError(event.message); setStatus('error'); break;
+          case 'error': setError(event.message); listenAfterRef.current = performance.now() + 600; setStatus(callActiveRef.current ? 'ready' : 'error'); break;
         }
       };
     };
@@ -98,44 +115,103 @@ export default function Home() {
     const silent = context.createGain(); silent.gain.value = 0;
     source.connect(worklet).connect(silent).connect(context.destination);
     worklet.port.onmessage = (event) => {
-      const { pcm, rms } = event.data; setLevel(Math.min(1, rms * 7));
+      const { pcm, rms }: { pcm: ArrayBuffer; rms: number } = event.data;
+      setLevel(Math.min(1, rms * 7));
       const socket = socketRef.current;
-      if (recordingRef.current && socket?.readyState === WebSocket.OPEN) socket.send(pcm);
+      const canListen = callActiveRef.current && performance.now() >= listenAfterRef.current && (statusRef.current === 'ready' || statusRef.current === 'recording');
+      if (!canListen || socket?.readyState !== WebSocket.OPEN) {
+        preRollRef.current = [];
+        triggerFramesRef.current = 0;
+        return;
+      }
+
+      if (!recordingRef.current) {
+        preRollRef.current.push(pcm);
+        if (preRollRef.current.length > 4) preRollRef.current.shift();
+        triggerFramesRef.current = rms >= 0.018 ? triggerFramesRef.current + 1 : 0;
+        if (triggerFramesRef.current < 2) return;
+
+        recordingRef.current = true;
+        triggerFramesRef.current = 0;
+        silenceFramesRef.current = 0;
+        voicedFramesRef.current = 0;
+        receivedFirstAudioRef.current = false;
+        speechEndRef.current = 0;
+        playbackAtRef.current = audioRef.current?.currentTime ?? 0;
+        setMetrics(emptyMetrics);
+        setTranscript('Listening…');
+        setAnswer('');
+        setError('');
+        statusRef.current = 'recording';
+        setStatus('recording');
+        socket.send(JSON.stringify({ type: 'start', client_time_ms: performance.timeOrigin + performance.now(), sample_rate: 16000 }));
+        for (const chunk of preRollRef.current) socket.send(chunk);
+        preRollRef.current = [];
+        return;
+      }
+
+      socket.send(pcm);
+      if (rms >= 0.012) {
+        voicedFramesRef.current += 1;
+        silenceFramesRef.current = 0;
+      } else {
+        silenceFramesRef.current += 1;
+      }
+      if (voicedFramesRef.current >= 2 && silenceFramesRef.current >= 8) {
+        recordingRef.current = false;
+        speechEndRef.current = performance.now();
+        statusRef.current = 'thinking';
+        setStatus('thinking');
+        socket.send(JSON.stringify({ type: 'stop', client_time_ms: performance.timeOrigin + performance.now() }));
+      }
     };
     workletRef.current = worklet;
   }, []);
 
-  const startRecording = useCallback(async () => {
-    if (recordingRef.current) return;
+  const toggleCall = useCallback(async () => {
     const socket = socketRef.current;
+    if (callActiveRef.current) {
+      callActiveRef.current = false;
+      setCallActive(false);
+      preRollRef.current = [];
+      if (recordingRef.current) {
+        recordingRef.current = false;
+        speechEndRef.current = performance.now();
+        socket?.send(JSON.stringify({ type: 'stop', client_time_ms: performance.timeOrigin + performance.now() }));
+      }
+      setLevel(0);
+      statusRef.current = 'ready';
+      setStatus('ready');
+      setTranscript('Conversation ended. Start a new call when you are ready.');
+      return;
+    }
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       setError('The voice backend is not connected yet.');
       return;
     }
     try {
-      await prepareMicrophone(); await audioRef.current?.resume(); playbackAtRef.current = audioRef.current?.currentTime ?? 0;
-      setMetrics(emptyMetrics); setTranscript('Listening…'); setAnswer(''); setError(''); receivedFirstAudioRef.current = false; speechEndRef.current = 0; recordingRef.current = true; setStatus('recording');
-      socket.send(JSON.stringify({ type: 'start', client_time_ms: performance.timeOrigin + performance.now(), sample_rate: 16000 }));
+      await prepareMicrophone();
+      await audioRef.current?.resume();
+      callActiveRef.current = true;
+      setCallActive(true);
+      listenAfterRef.current = performance.now() + 250;
+      setTranscript('Call active — start speaking naturally.');
+      setError('');
+      statusRef.current = 'ready';
+      setStatus('ready');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Microphone permission was denied.'); setStatus('error'); }
   }, [prepareMicrophone]);
 
-  const stopRecording = useCallback(() => {
-    if (!recordingRef.current) return;
-    recordingRef.current = false; speechEndRef.current = performance.now(); setLevel(0); setStatus('thinking');
-    socketRef.current?.send(JSON.stringify({ type: 'stop', client_time_ms: performance.timeOrigin + performance.now() }));
-  }, []);
-
   useEffect(() => {
-    const down = (e: KeyboardEvent) => { if (e.code === 'Space' && !e.repeat && !(e.target instanceof HTMLInputElement)) { e.preventDefault(); void startRecording(); } };
-    const up = (e: KeyboardEvent) => { if (e.code === 'Space') { e.preventDefault(); stopRecording(); } };
-    window.addEventListener('keydown', down); window.addEventListener('keyup', up);
-    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); streamRef.current?.getTracks().forEach((track) => track.stop()); void audioRef.current?.close(); };
-  }, [startRecording, stopRecording]);
+    const down = (e: KeyboardEvent) => { if (e.code === 'Space' && !e.repeat && !(e.target instanceof HTMLInputElement)) { e.preventDefault(); void toggleCall(); } };
+    window.addEventListener('keydown', down);
+    return () => { window.removeEventListener('keydown', down); streamRef.current?.getTracks().forEach((track) => track.stop()); void audioRef.current?.close(); };
+  }, [toggleCall]);
 
   const statusText: Record<Status, string> = { connecting: 'Connecting', ready: 'Ready', recording: 'Listening', thinking: 'Thinking', speaking: 'Speaking', error: 'Needs attention' };
   return (
     <main className="shell">
-      <header className="topbar"><div className="brand"><span className="brand-mark">V</span><div><strong>VoiceBench</strong><small>LOCAL LATENCY LAB</small></div></div><div className={`connection ${status}`}><i />{statusText[status]}</div></header>
+      <header className="topbar"><div className="brand"><span className="brand-mark">V</span><div><strong>VoiceBench</strong><small>LOCAL LATENCY LAB</small></div></div><div className={`connection ${status}`}><i />{callActive && status === 'ready' ? 'Listening' : statusText[status]}</div></header>
       <section className="hero"><div><p className="eyebrow">END-TO-END VOICE PIPELINE</p><h1>Hear exactly where<br />the milliseconds go.</h1></div><p className="intro">A local, private benchmark for Moonshine, Gemma, and Piper. Audio never leaves your server.</p></section>
       <section className="workspace">
         <div className="conversation">
@@ -147,7 +223,7 @@ export default function Home() {
           <div className="turn"><div className="speaker"><span>YOU</span><i /></div><p className={status === 'recording' ? 'live-text' : ''}>{transcript}</p></div>
           <div className="turn answer"><div className="speaker"><span>AI</span><i /></div><p>{answer || (status === 'thinking' ? 'Generating a response…' : 'The model response will appear here.')}</p></div>
           <div className="talk-zone"><div className="wave" aria-hidden="true">{Array.from({ length: 28 }, (_, i) => <i key={i} style={{ height: `${8 + Math.sin(i * 1.8) * 5 + level * (12 + (i % 5) * 6)}px` }} />)}</div>
-            <button className={`talk-button ${status === 'recording' ? 'active' : ''}`} onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); void startRecording(); }} onPointerUp={stopRecording} onPointerCancel={stopRecording} disabled={status === 'connecting'} aria-label="Hold to talk"><span>{status === 'recording' ? '■' : '●'}</span>{status === 'recording' ? 'Release to send' : 'Hold to talk'}</button><small>or hold the space bar</small></div>
+            <button className={`talk-button ${callActive ? 'active' : ''}`} onClick={() => void toggleCall()} disabled={status === 'connecting'} aria-label={callActive ? 'End conversation' : 'Start conversation'}><span>{callActive ? '■' : '●'}</span>{callActive ? 'End call' : 'Start call'}</button><small>{callActive ? 'Voice detection is active' : 'or press the space bar'}</small></div>
           {error && <div className="error-banner" role="alert">{error}</div>}
         </div>
         <aside className="dashboard"><div className="dashboard-head"><div><p className="eyebrow">LIVE MEASUREMENTS</p><h2>Latency</h2></div><span>THIS TURN</span></div>
