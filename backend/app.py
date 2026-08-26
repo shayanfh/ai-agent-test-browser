@@ -47,7 +47,10 @@ async def health():
         for name, url in (("llm", f"{LLAMA_URL}/health"), ("tts", f"{PIPER_URL}/")):
             try:
                 response = await client.get(url)
-                downstream[name] = response.is_success
+                # Health here means the HTTP process is reachable. Some Piper
+                # releases omit optional metadata routes and answer 404 while
+                # the synthesis endpoint is fully operational.
+                downstream[name] = response.status_code < 500
             except httpx.HTTPError:
                 downstream[name] = False
     ready = all(downstream.values())

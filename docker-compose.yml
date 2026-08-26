@@ -72,7 +72,10 @@ services:
       piper:
         condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      # Container readiness must only test FastAPI itself. Downstream model
+      # readiness remains observable through /api/health without deadlocking
+      # startup of the public gateway.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/docs"]
       interval: 15s
       timeout: 5s
       retries: 20
