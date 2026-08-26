@@ -42,7 +42,9 @@ app = FastAPI(title="VoiceBench", version="1.0.0", lifespan=lifespan)
 async def health():
     downstream = {}
     async with httpx.AsyncClient(timeout=2.0) as client:
-        for name, url in (("llm", f"{LLAMA_URL}/health"), ("tts", f"{PIPER_URL}/info")):
+        # Piper's lightweight Flask server exposes its UI at `/` in all
+        # supported releases, while the optional `/info` route varies.
+        for name, url in (("llm", f"{LLAMA_URL}/health"), ("tts", f"{PIPER_URL}/")):
             try:
                 response = await client.get(url)
                 downstream[name] = response.is_success
