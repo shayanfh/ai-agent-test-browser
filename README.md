@@ -27,6 +27,8 @@ docker compose logs -f model-init llama backend
 
 The first start downloads all three model sets into the persistent `models` volume. This can take several minutes. Later starts reuse the same files. Open `http://SERVER_IP:8080` for a LAN smoke test.
 
+The backend has write access to this volume because Moonshine creates temporary lock files while opening cached model assets. The llama.cpp and Piper containers mount the same assets read-only.
+
 For a public server, set `DOMAIN` in `.env`, point its DNS record to the server, open TCP ports 80/443 and UDP 443, then run:
 
 ```bash

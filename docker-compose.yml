@@ -62,7 +62,8 @@ services:
       HF_HOME: /models/huggingface
       SYSTEM_PROMPT: "${SYSTEM_PROMPT:-You are a concise voice assistant. Reply naturally in one to three short sentences. Avoid markdown.}"
     volumes:
-      - models:/models:ro
+      # Moonshine creates short-lived FileLock files beside cached model assets.
+      - models:/models
     depends_on:
       model-init:
         condition: service_completed_successfully
