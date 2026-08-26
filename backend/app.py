@@ -200,8 +200,15 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
             message = f"Audio arrived (peak {turn.peak:.2f}, RMS {rms:.3f}) but Moonshine produced no English transcript. Try a clear English sentence."
         await send_json(websocket, lock, {"type": "error", "stage": "stt", "message": message})
         return
+    # Keep complete user/assistant pairs. Trimming after appending the new user
+    # can leave an assistant message at the front, which Gemma rejects as an
+    # invalid role sequence once a call reaches several turns.
+    if history and history[-1].get("role") == "user":
+        history.pop()
+    history[:] = history[-6:]
+    while history and history[0].get("role") != "user":
+        history.pop(0)
     history.append({"role": "user", "content": text})
-    history[:] = history[-8:]
     llm_started = time.perf_counter()
     first_token_at = None
     token_count = 0
@@ -214,7 +221,9 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
         payload = {"model": MODEL_NAME, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *history], "stream": True, "max_tokens": MAX_TOKENS, "temperature": 0.6}
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream("POST", f"{LLAMA_URL}/v1/chat/completions", json=payload) as response:
-                response.raise_for_status()
+                if not response.is_success:
+                    body = (await response.aread()).decode("utf-8", errors="replace")
+                    raise RuntimeError(f"llama.cpp returned HTTP {response.status_code}: {body[:800]}")
                 async for line in response.aiter_lines():
                     if not line.startswith("data: ") or line == "data: [DONE]":
                         continue
@@ -248,6 +257,8 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
         if answer:
             history.append({"role": "assistant", "content": answer})
     except Exception as exc:
+        if history and history[-1].get("role") == "user" and history[-1].get("content") == text:
+            history.pop()
         await send_json(websocket, lock, {"type": "error", "stage": "llm", "message": f"Gemma failed: {exc}"})
     finally:
         await tts_queue.put(None)
