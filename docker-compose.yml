@@ -58,6 +58,7 @@ services:
       PIPER_URL: http://piper:5000
       MODEL_NAME: gemma-3-1b-it
       MAX_TOKENS: "${MAX_TOKENS:-160}"
+      MOONSHINE_VAD_THRESHOLD: "${MOONSHINE_VAD_THRESHOLD:-0}"
       XDG_CACHE_HOME: /models/cache
       HF_HOME: /models/huggingface
       SYSTEM_PROMPT: "${SYSTEM_PROMPT:-You are a concise voice assistant. Reply naturally in one to three short sentences. Avoid markdown.}"
@@ -75,7 +76,7 @@ services:
       # Container readiness must only test FastAPI itself. Downstream model
       # readiness remains observable through /api/health without deadlocking
       # startup of the public gateway.
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/docs"]
+      test: ["CMD", "curl", "-fsS", "localhost:8000/docs"]
       interval: 15s
       timeout: 5s
       retries: 20

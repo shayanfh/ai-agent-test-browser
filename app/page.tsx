@@ -78,7 +78,16 @@ export default function Home() {
   }, [playAudio]);
 
   const prepareMicrophone = useCallback(async () => {
+    if (audioRef.current?.state === 'closed') {
+      audioRef.current = null;
+      workletRef.current = null;
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
     if (workletRef.current) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Microphone access requires HTTPS when opening the app from a LAN IP. Use HTTPS or open it through an SSH tunnel at http://localhost:8080.');
+    }
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     streamRef.current = stream;
     const context = new AudioContext();
@@ -97,13 +106,18 @@ export default function Home() {
   }, []);
 
   const startRecording = useCallback(async () => {
-    if (recordingRef.current || status === 'connecting') return;
+    if (recordingRef.current) return;
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setError('The voice backend is not connected yet.');
+      return;
+    }
     try {
       await prepareMicrophone(); await audioRef.current?.resume(); playbackAtRef.current = audioRef.current?.currentTime ?? 0;
       setMetrics(emptyMetrics); setTranscript('Listening…'); setAnswer(''); setError(''); receivedFirstAudioRef.current = false; speechEndRef.current = 0; recordingRef.current = true; setStatus('recording');
-      socketRef.current?.send(JSON.stringify({ type: 'start', client_time_ms: performance.timeOrigin + performance.now(), sample_rate: 16000 }));
+      socket.send(JSON.stringify({ type: 'start', client_time_ms: performance.timeOrigin + performance.now(), sample_rate: 16000 }));
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Microphone permission was denied.'); setStatus('error'); }
-  }, [prepareMicrophone, status]);
+  }, [prepareMicrophone]);
 
   const stopRecording = useCallback(() => {
     if (!recordingRef.current) return;

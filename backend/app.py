@@ -6,6 +6,7 @@ import os
 import re
 import time
 import wave
+import math
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
@@ -29,7 +30,16 @@ MODEL_NAME = os.getenv("MODEL_NAME", "gemma-3-1b-it")
 async def lifespan(app: FastAPI):
     log.info("Loading Moonshine Tiny Streaming")
     model_path, model_arch = get_model_for_language("en", ModelArch.TINY_STREAMING)
-    app.state.transcriber = Transcriber(model_path=model_path, model_arch=model_arch)
+    # Push-to-talk already gives us exact utterance boundaries. Disabling VAD
+    # prevents quiet microphones from discarding an otherwise valid turn.
+    options = {
+        "vad_threshold": os.getenv("MOONSHINE_VAD_THRESHOLD", "0"),
+        "vad_max_segment_duration": "120",
+    }
+    debug_audio_path = os.getenv("MOONSHINE_DEBUG_AUDIO_PATH", "").strip()
+    if debug_audio_path:
+        options["save_input_wav_path"] = debug_audio_path
+    app.state.transcriber = Transcriber(model_path=model_path, model_arch=model_arch, options=options)
     log.info("Moonshine ready from %s", model_path)
     yield
     app.state.transcriber.close()
@@ -91,6 +101,8 @@ class VoiceTurn:
     final_text: str = ""
     last_sent_text: str = ""
     first_partial_at: float | None = None
+    peak: float = 0.0
+    energy_sum: float = 0.0
 
     def __post_init__(self):
         self.stream = self.transcriber.create_stream(update_interval=0.18)
@@ -101,6 +113,9 @@ class VoiceTurn:
     def add_pcm16(self, raw: bytes):
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
         self.audio_samples += len(samples)
+        if len(samples):
+            self.peak = max(self.peak, float(np.max(np.abs(samples))))
+            self.energy_sum += float(np.dot(samples, samples))
         self.stream.add_audio(samples.tolist(), 16000)
 
     def stop(self):
@@ -173,7 +188,15 @@ async def tts_worker(websocket: WebSocket, lock: asyncio.Lock, queue: asyncio.Qu
 async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn, history: list[dict]):
     text = turn.final_text or turn.latest_text
     if not text:
-        await send_json(websocket, lock, {"type": "error", "stage": "stt", "message": "Moonshine did not detect speech. Try speaking closer to the microphone."})
+        duration = turn.audio_samples / 16000
+        rms = math.sqrt(turn.energy_sum / max(1, turn.audio_samples))
+        if duration < 0.5:
+            message = f"Only {duration:.1f}s of audio arrived. Hold the button while speaking for at least one second."
+        elif turn.peak < 0.01:
+            message = f"The microphone signal is almost silent (peak {turn.peak:.3f}). Check the selected input device and browser microphone level."
+        else:
+            message = f"Audio arrived (peak {turn.peak:.2f}, RMS {rms:.3f}) but Moonshine produced no English transcript. Try a clear English sentence."
+        await send_json(websocket, lock, {"type": "error", "stage": "stt", "message": message})
         return
     history.append({"role": "user", "content": text})
     history[:] = history[-8:]
@@ -260,7 +283,8 @@ async def voice_socket(websocket: WebSocket):
             elif event.get("type") == "stop" and turn:
                 await asyncio.to_thread(turn.stop)
                 ended = turn.ended_at or time.perf_counter()
-                await send_json(websocket, lock, {"type": "stt_final", "text": turn.final_text or turn.latest_text, "speech_duration_ms": turn.audio_samples / 16.0, "stt_final_ms": (time.perf_counter() - ended) * 1000})
+                rms = math.sqrt(turn.energy_sum / max(1, turn.audio_samples))
+                await send_json(websocket, lock, {"type": "stt_final", "text": turn.final_text or turn.latest_text, "speech_duration_ms": turn.audio_samples / 16.0, "stt_final_ms": (time.perf_counter() - ended) * 1000, "audio_peak": turn.peak, "audio_rms": rms})
                 await process_turn(websocket, lock, turn, history)
                 turn = None
     except WebSocketDisconnect:
