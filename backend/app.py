@@ -162,7 +162,9 @@ async def tts_worker(websocket: WebSocket, lock: asyncio.Lock, queue: asyncio.Qu
                 return
             started = time.perf_counter()
             try:
-                response = await client.post(f"{PIPER_URL}/synthesize", json={"text": text})
+                # piper-tts 1.4.x serves synthesis as POST `/`. Newer variants
+                # may expose `/synthesize`, but the pinned runtime uses root.
+                response = await client.post(f"{PIPER_URL}/", json={"text": text})
                 response.raise_for_status()
                 audio = response.content
                 finished = time.perf_counter()
