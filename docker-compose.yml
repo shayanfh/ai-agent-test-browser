@@ -1,0 +1,121 @@
+name: voicebench
+
+services:
+  model-init:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "model_init.py"]
+    environment:
+      MODEL_ROOT: /models
+      XDG_CACHE_HOME: /models/cache
+      HF_HOME: /models/huggingface
+    volumes:
+      - models:/models
+    restart: "no"
+
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    command:
+      - --model
+      - /models/llm/gemma-3-1b-it-Q4_K_M.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "4096"
+      - --threads
+      - "${LLAMA_THREADS:-4}"
+      - --parallel
+      - "1"
+      - --metrics
+    volumes:
+      - models:/models:ro
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  piper:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "piper.http_server", "--host", "0.0.0.0", "--port", "5000", "--data-dir", "/models/piper", "-m", "en_US-lessac-medium"]
+    volumes:
+      - models:/models:ro
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      LLAMA_URL: http://llama:8080
+      PIPER_URL: http://piper:5000
+      MODEL_NAME: gemma-3-1b-it
+      MAX_TOKENS: "${MAX_TOKENS:-160}"
+      XDG_CACHE_HOME: /models/cache
+      HF_HOME: /models/huggingface
+      SYSTEM_PROMPT: "${SYSTEM_PROMPT:-You are a concise voice assistant. Reply naturally in one to three short sentences. Avoid markdown.}"
+    volumes:
+      - models:/models:ro
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+      llama:
+        condition: service_started
+      piper:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+
+  gateway:
+    image: nginx:1.29-alpine
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.10-alpine
+    profiles: ["https"]
+    environment:
+      DOMAIN: "${DOMAIN:-localhost}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./gateway/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  models:
+  caddy_data:
+  caddy_config:
