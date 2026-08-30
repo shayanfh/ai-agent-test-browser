@@ -41,7 +41,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: ["python", "-m", "piper.http_server", "--host", "0.0.0.0", "--port", "5000", "--data-dir", "/models/piper", "-m", "en_US-lessac-medium"]
+    command: ["python", "-m", "piper.http_server", "--host", "0.0.0.0", "--port", "5000", "--data-dir", "/models/piper", "-m", "en_US-amy-medium"]
     volumes:
       - models:/models:ro
     depends_on:
