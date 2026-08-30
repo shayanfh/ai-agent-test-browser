@@ -77,4 +77,4 @@ Raw latency is best measured with the browser and all containers on the same ser
 - Arabic uses `RightNowAI/RightNow-Arabic-0.5B-Turbo`, file `RightNow-Arabic-0.5B-Turbo-q4_k_m.gguf`.
 - Piper uses `en_US-amy-medium` and `ar_JO-kareem-medium` through the official downloader.
 
-Gemma is subject to its model license; RightNow Arabic is Apache-2.0; Piper 1 is GPL-3.0-or-later; Moonshine streaming models and library are MIT.
+Gemma is subject to its model license; RightNow Arabic is Apache-2.0; Piper 1 is GPL-3.0-or-later. The installed Moonshine Arabic runtime currently prints a Moonshine Community License warning, so verify those terms before commercial use even though the public checkpoint card lists MIT.
