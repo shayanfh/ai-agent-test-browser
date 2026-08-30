@@ -26,7 +26,7 @@ services:
       - --ctx-size
       - "4096"
       - --threads
-      - "${LLAMA_THREADS:-4}"
+      - "${LLAMA_EN_THREADS:-4}"
       - --parallel
       - "1"
       - --metrics
@@ -35,6 +35,41 @@ services:
     depends_on:
       model-init:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  llama-ar:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    command:
+      - --model
+      - /models/llm-ar/gguf/RightNow-Arabic-0.5B-Turbo-q4_k_m.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "4096"
+      - --threads
+      - "${LLAMA_AR_THREADS:-4}"
+      - --parallel
+      - "1"
+      - --metrics
+    volumes:
+      - models:/models:ro
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     restart: unless-stopped
 
   piper:
@@ -47,6 +82,30 @@ services:
     depends_on:
       model-init:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-sS", "-o", "/dev/null", "http://localhost:5000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  piper-ar:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "piper.http_server", "--host", "0.0.0.0", "--port", "5000", "--data-dir", "/models/piper", "-m", "ar_JO-kareem-medium"]
+    volumes:
+      - models:/models:ro
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-sS", "-o", "/dev/null", "http://localhost:5000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
     restart: unless-stopped
 
   backend:
@@ -54,14 +113,18 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      LLAMA_URL: http://llama:8080
-      PIPER_URL: http://piper:5000
-      MODEL_NAME: gemma-3-1b-it
+      LLAMA_EN_URL: http://llama:8080
+      LLAMA_AR_URL: http://llama-ar:8080
+      PIPER_EN_URL: http://piper:5000
+      PIPER_AR_URL: http://piper-ar:5000
+      MODEL_NAME_EN: gemma-3-1b-it
+      MODEL_NAME_AR: RightNow-Arabic-0.5B-Turbo
       MAX_TOKENS: "${MAX_TOKENS:-160}"
       MOONSHINE_VAD_THRESHOLD: "${MOONSHINE_VAD_THRESHOLD:-0.35}"
       XDG_CACHE_HOME: /models/cache
       HF_HOME: /models/huggingface
       SYSTEM_PROMPT: "${SYSTEM_PROMPT:-You are a concise voice assistant. Reply naturally in one to three short sentences. Avoid markdown.}"
+      SYSTEM_PROMPT_AR: "${SYSTEM_PROMPT_AR:-أنت مساعد صوتي موجز. أجب بالعربية بشكل طبيعي في جملة إلى ثلاث جمل قصيرة، وتجنب تنسيق Markdown.}"
     volumes:
       # Moonshine creates short-lived FileLock files beside cached model assets.
       - models:/models
@@ -69,9 +132,13 @@ services:
       model-init:
         condition: service_completed_successfully
       llama:
-        condition: service_started
+        condition: service_healthy
+      llama-ar:
+        condition: service_healthy
       piper:
-        condition: service_started
+        condition: service_healthy
+      piper-ar:
+        condition: service_healthy
     healthcheck:
       # Container readiness must only test FastAPI itself. Downstream model
       # readiness remains observable through /api/health without deadlocking

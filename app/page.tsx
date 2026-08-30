@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 type Status = 'connecting' | 'ready' | 'recording' | 'thinking' | 'speaking' | 'error';
+type RouteLanguage = 'auto' | 'en' | 'ar';
 type Metrics = { speechDuration?: number; firstPartial?: number; sttFinal?: number; ttft?: number; tokensPerSecond?: number; llmTotal?: number; ttsFirstAudio?: number; ttsRealtime?: number; total?: number };
 const emptyMetrics: Metrics = {};
 
@@ -19,6 +20,8 @@ export default function Home() {
   const [error, setError] = useState('');
   const [level, setLevel] = useState(0);
   const [callActive, setCallActive] = useState(false);
+  const [routeLanguage, setRouteLanguage] = useState<RouteLanguage>('auto');
+  const [routeConfidence, setRouteConfidence] = useState(0);
   const socketRef = useRef<WebSocket | null>(null);
   const recordingRef = useRef(false);
   const callActiveRef = useRef(false);
@@ -81,8 +84,9 @@ export default function Home() {
         if (message.data instanceof ArrayBuffer) { void playAudio(message.data); return; }
         const event = JSON.parse(message.data);
         switch (event.type) {
-          case 'stt_partial': setTranscript(event.text || 'Listening…'); setMetrics((m) => ({ ...m, firstPartial: m.firstPartial ?? event.first_partial_ms })); break;
-          case 'stt_final': setTranscript(event.text || 'No speech detected'); setMetrics((m) => ({ ...m, speechDuration: event.speech_duration_ms, sttFinal: event.stt_final_ms })); setStatus('thinking'); break;
+          case 'stt_partial': setTranscript(event.text || 'Listening…'); if (event.stable) { setRouteLanguage(event.language); setRouteConfidence(event.confidence || 0); } setMetrics((m) => ({ ...m, firstPartial: m.firstPartial ?? event.first_partial_ms })); break;
+          case 'language_detected': setRouteLanguage(event.language); setRouteConfidence(event.confidence || 0); break;
+          case 'stt_final': setTranscript(event.text || 'No speech detected'); setRouteLanguage(event.language || 'auto'); setRouteConfidence(event.confidence || 0); setMetrics((m) => ({ ...m, speechDuration: event.speech_duration_ms, sttFinal: event.stt_final_ms })); setStatus('thinking'); break;
           case 'stt_ignored': setTranscript('Listening for speech…'); setError(''); listenAfterRef.current = performance.now() + 350; setStatus('ready'); break;
           case 'llm_token': setAnswer((text) => text + event.delta); setMetrics((m) => ({ ...m, ttft: m.ttft ?? event.ttft_ms })); break;
           case 'llm_done': setMetrics((m) => ({ ...m, tokensPerSecond: event.tokens_per_second, llmTotal: event.total_ms })); break;
@@ -145,6 +149,8 @@ export default function Home() {
         speechEndRef.current = 0;
         playbackAtRef.current = audioRef.current?.currentTime ?? 0;
         setMetrics(emptyMetrics);
+        setRouteLanguage('auto');
+        setRouteConfidence(0);
         setTranscript('Listening…');
         setAnswer('');
         setError('');
@@ -217,27 +223,29 @@ export default function Home() {
   }, [toggleCall]);
 
   const statusText: Record<Status, string> = { connecting: 'Connecting', ready: 'Ready', recording: 'Listening', thinking: 'Thinking', speaking: 'Speaking', error: 'Needs attention' };
+  const routeLabel = routeLanguage === 'ar' ? 'العربية' : routeLanguage === 'en' ? 'English' : 'Auto detect';
+  const llmLabel = routeLanguage === 'ar' ? 'RightNow Arabic 0.5B' : routeLanguage === 'en' ? 'Gemma 3 1B' : 'Gemma + RightNow';
   return (
     <main className="shell">
       <header className="topbar"><div className="brand"><span className="brand-mark">V</span><div><strong>VoiceBench</strong><small>LOCAL LATENCY LAB</small></div></div><div className={`connection ${status}`}><i />{callActive && status === 'ready' ? 'Listening' : statusText[status]}</div></header>
-      <section className="hero"><div><p className="eyebrow">END-TO-END VOICE PIPELINE</p><h1>Hear exactly where<br />the milliseconds go.</h1></div><p className="intro">A local, private benchmark for Moonshine, Gemma, and Piper. Audio never leaves your server.</p></section>
+      <section className="hero"><div><p className="eyebrow">BILINGUAL END-TO-END VOICE PIPELINE</p><h1>Hear exactly where<br />the milliseconds go.</h1></div><p className="intro">A local English–Arabic benchmark with partial-STT language routing. Audio never leaves your server.</p></section>
       <section className="workspace">
         <div className="conversation">
           <div className="pipeline" aria-label="Active model pipeline">
-            <div><span className="step">01</span><p>Speech to text<strong>Moonshine Tiny Streaming</strong></p></div><b>→</b>
-            <div><span className="step">02</span><p>Language model<strong>Gemma 3 1B · Q4_K_M</strong></p></div><b>→</b>
-            <div><span className="step">03</span><p>Text to speech<strong>Piper · Lessac Medium</strong></p></div>
+            <div><span className="step">01</span><p>Speech + language<strong>Moonshine Tiny · EN + AR</strong></p></div><b>→</b>
+            <div><span className="step">02</span><p>Language model<strong>{llmLabel}</strong></p></div><b>→</b>
+            <div><span className="step">03</span><p>Text to speech<strong>Piper · Amy / Kareem</strong></p></div>
           </div>
-          <div className="turn"><div className="speaker"><span>YOU</span><i /></div><p className={status === 'recording' ? 'live-text' : ''}>{transcript}</p></div>
-          <div className="turn answer"><div className="speaker"><span>AI</span><i /></div><p>{answer || (status === 'thinking' ? 'Generating a response…' : 'The model response will appear here.')}</p></div>
+          <div className="turn"><div className="speaker"><span>YOU</span><i /></div><p dir="auto" className={status === 'recording' ? 'live-text' : ''}>{transcript}</p></div>
+          <div className="turn answer"><div className="speaker"><span>AI</span><i /></div><p dir="auto">{answer || (status === 'thinking' ? 'Generating a response…' : 'The model response will appear here.')}</p></div>
           <div className="talk-zone"><div className="wave" aria-hidden="true">{Array.from({ length: 28 }, (_, i) => <i key={i} style={{ height: `${8 + Math.sin(i * 1.8) * 5 + level * (12 + (i % 5) * 6)}px` }} />)}</div>
             <button className={`talk-button ${callActive ? 'active' : ''}`} onClick={() => void toggleCall()} disabled={status === 'connecting'} aria-label={callActive ? 'End conversation' : 'Start conversation'}><span>{callActive ? '■' : '●'}</span>{callActive ? 'End call' : 'Start call'}</button><small>{callActive ? 'Voice detection is active' : 'or press the space bar'}</small></div>
           {error && <div className="error-banner" role="alert">{error}</div>}
         </div>
-        <aside className="dashboard"><div className="dashboard-head"><div><p className="eyebrow">LIVE MEASUREMENTS</p><h2>Latency</h2></div><span>THIS TURN</span></div>
+        <aside className="dashboard"><div className="dashboard-head"><div><p className="eyebrow">LIVE MEASUREMENTS</p><h2>Latency</h2></div><span className={`route-badge ${routeLanguage}`}>{routeLabel}{routeConfidence > 0 ? ` · ${Math.round(routeConfidence * 100)}%` : ''}</span></div>
           <div className="total"><span>End speech → first audio</span><strong>{metrics.total === undefined ? '—' : metrics.total.toFixed(0)}<small>{metrics.total === undefined ? '' : ' ms'}</small></strong><div><i style={{ width: `${Math.min(100, (metrics.total ?? 0) / 10)}%` }} /></div></div>
           <div className="metric-group"><h3><span>STT</span>Moonshine</h3><Metric label="Speech duration" value={metrics.speechDuration} /><Metric label="First partial" value={metrics.firstPartial} /><Metric label="Final after end" value={metrics.sttFinal} /></div>
-          <div className="metric-group"><h3><span>LLM</span>Gemma 3</h3><Metric label="Time to first token" value={metrics.ttft} /><Metric label="Generation speed" value={metrics.tokensPerSecond} unit="tok/s" /><Metric label="Total generation" value={metrics.llmTotal} /></div>
+          <div className="metric-group"><h3><span>LLM</span>{llmLabel}</h3><Metric label="Time to first token" value={metrics.ttft} /><Metric label="Generation speed" value={metrics.tokensPerSecond} unit="tok/s" /><Metric label="Total generation" value={metrics.llmTotal} /></div>
           <div className="metric-group"><h3><span>TTS</span>Piper</h3><Metric label="Time to first audio" value={metrics.ttsFirstAudio} /><Metric label="Generation speed" value={metrics.ttsRealtime} unit="× realtime" /></div>
         </aside>
       </section>
