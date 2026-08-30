@@ -65,6 +65,9 @@ Copy `.env.example` to `.env` and adjust:
 - `MAX_TOKENS`: maximum response length; shorter responses reduce total turn time.
 - `MAX_TOKENS_AR`: Arabic generation ceiling (default `48`).
 - `ARABIC_MAX_WORDS`: hard limit applied before Arabic text reaches TTS (default `22`, one sentence maximum).
+- `PIPER_AR_LENGTH_SCALE`: Arabic speaking pace; lower is faster (default `0.92`).
+- `PIPER_AR_NOISE_SCALE`: Arabic voice variation (default `0.75`).
+- `PIPER_AR_NOISE_W_SCALE`: Arabic phoneme-duration variation (default `0.90`).
 - `SYSTEM_PROMPT`: English voice assistant behavior.
 - `SYSTEM_PROMPT_AR`: Arabic voice assistant behavior.
 - `HTTP_PORT`: direct HTTP benchmark port (default `8080`).

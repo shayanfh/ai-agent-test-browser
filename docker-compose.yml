@@ -94,7 +94,24 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: ["python", "-m", "piper.http_server", "--host", "0.0.0.0", "--port", "5000", "--data-dir", "/models/piper", "-m", "ar_JO-kareem-medium"]
+    command:
+      - python
+      - -m
+      - piper.http_server
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --data-dir
+      - /models/piper
+      - -m
+      - ar_JO-kareem-medium
+      - --length-scale
+      - "${PIPER_AR_LENGTH_SCALE:-0.92}"
+      - --noise-scale
+      - "${PIPER_AR_NOISE_SCALE:-0.75}"
+      - --noise-w-scale
+      - "${PIPER_AR_NOISE_W_SCALE:-0.90}"
     volumes:
       - models:/models:ro
     depends_on:
