@@ -196,6 +196,7 @@ export default function Home() {
       statusRef.current = 'ready';
       setStatus('ready');
       setTranscript('Conversation ended. Start a new call when you are ready.');
+      socket?.send(JSON.stringify({ type: 'conversation_end' }));
       return;
     }
     if (!socket || socket.readyState !== WebSocket.OPEN) {
@@ -206,6 +207,7 @@ export default function Home() {
       await prepareMicrophone();
       await audioRef.current?.resume();
       callActiveRef.current = true;
+      socket.send(JSON.stringify({ type: 'conversation_start' }));
       noiseFloorRef.current = 0.004;
       setCallActive(true);
       listenAfterRef.current = performance.now() + 250;

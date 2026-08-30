@@ -40,6 +40,16 @@ SYSTEM_PROMPTS = {
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "160"))
 ARABIC_RE = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]")
 LATIN_RE = re.compile(r"[A-Za-z]")
+ROUTE_PHRASES = {
+    "ar": (
+        "السلام عليكم", "وعليكم السلام", "صباح الخير", "مساء الخير",
+        "مرحبا", "أهلا", "لو سمحت", "من فضلك", "شكرا",
+    ),
+    "en": (
+        "hello", "good morning", "good evening", "how are you",
+        "please", "thank you", "thanks",
+    ),
+}
 
 
 @asynccontextmanager
@@ -98,6 +108,8 @@ class TranscriptCandidate:
     final_text: str = ""
     first_partial_at: float | None = None
     updates: int = 0
+    stability: float = 0.5
+    revision_chars: int = 0
 
 
 class RouteListener(TranscriptEventListener):
@@ -111,6 +123,16 @@ class RouteListener(TranscriptEventListener):
             return
         candidate = self.turn.candidates[self.language]
         if text != candidate.latest_text:
+            previous = candidate.latest_text
+            if previous:
+                common = 0
+                for old_char, new_char in zip(previous, text):
+                    if old_char != new_char:
+                        break
+                    common += 1
+                retained = common / max(1, min(len(previous), len(text)))
+                candidate.stability = candidate.stability * 0.65 + retained * 0.35
+                candidate.revision_chars += max(0, len(previous) - common)
             candidate.latest_text = text
             candidate.updates += 1
         if candidate.first_partial_at is None:
@@ -137,7 +159,19 @@ def route_score(language: str, candidate: TranscriptCandidate) -> float:
     native = arabic if language == "ar" else latin
     foreign = latin if language == "ar" else arabic
     purity = native / max(1, native + foreign)
-    return min(native, 24) * 0.65 + purity * 5.0 - foreign * 0.45 + min(candidate.updates, 4) * 0.55 + (1.5 if candidate.final_text else 0.0)
+    normalized = " ".join(text.lower().split())
+    phrase_bonus = max((4.0 if phrase in normalized else 0.0) for phrase in ROUTE_PHRASES[language])
+    # Character count is deliberately capped very early. Two monolingual
+    # recognizers can both hallucinate fluent-looking text for the same audio;
+    # a longer hallucination must not beat a shorter correct transcript.
+    presence = min(native, 6) / 3.0
+    revision_penalty = min(2.0, candidate.revision_chars / 12.0)
+    return (
+        presence + purity * 4.0 - foreign * 0.35
+        + min(candidate.updates, 4) * 0.35
+        + candidate.stability * 1.5 - revision_penalty
+        + phrase_bonus + (1.0 if candidate.final_text else 0.0)
+    )
 
 
 @dataclass
@@ -179,18 +213,22 @@ class VoiceTurn:
         for stream in self.streams.values():
             stream.close()
 
-    def routing_snapshot(self, final: bool = False) -> dict:
+    def routing_snapshot(self, final: bool = False, preferred_language: str | None = None) -> dict:
         scores = {language: route_score(language, candidate) for language, candidate in self.candidates.items()}
         partial_times = [candidate.first_partial_at for candidate in self.candidates.values() if candidate.first_partial_at is not None]
         if partial_times:
             earliest = min(partial_times)
             for language, candidate in self.candidates.items():
                 if candidate.first_partial_at is not None:
-                    # The matching recognizer normally starts producing useful,
-                    # growing partials first. Use latency only as a tie-breaker;
-                    # script purity, transcript length and repeated updates still
-                    # carry most of the routing score.
-                    scores[language] += max(0.0, 2.5 - (candidate.first_partial_at - earliest) * 5.0)
+                    # First-partial time is only a small tie-breaker. A wrong
+                    # recognizer can emit a hallucination before the matching
+                    # recognizer has accumulated enough speech.
+                    scores[language] += max(0.0, 0.5 - (candidate.first_partial_at - earliest))
+        if preferred_language in LANGUAGES and self.candidates[preferred_language].latest_text:
+            # Telephone conversations normally stay in one language. Preserve
+            # that route with a modest bias, while still allowing a clear
+            # code-switch to win.
+            scores[preferred_language] += 2.0
         language = max(scores, key=scores.get)
         candidate = self.candidates[language]
         text = candidate.final_text or candidate.latest_text
@@ -211,6 +249,10 @@ class VoiceTurn:
             "first_partial_ms": ((candidate.first_partial_at or time.perf_counter()) - self.started_at) * 1000,
             "scores": {key: round(value, 2) for key, value in scores.items()},
             "candidates": {key: value.final_text or value.latest_text for key, value in self.candidates.items()},
+            "router_debug": {
+                key: {"updates": value.updates, "stability": round(value.stability, 3), "revision_chars": value.revision_chars}
+                for key, value in self.candidates.items()
+            },
         }
 
 
@@ -379,6 +421,7 @@ async def voice_socket(websocket: WebSocket):
     # Keep one conversation across route changes, so callers can switch
     # language mid-call without losing the previous order/context.
     history: list[dict] = []
+    preferred_language: str | None = None
     turn: VoiceTurn | None = None
     await websocket.send_json({
         "type": "hello", "sample_rate": 16000, "languages": list(LANGUAGES),
@@ -392,7 +435,7 @@ async def voice_socket(websocket: WebSocket):
             if message.get("bytes") is not None:
                 if turn:
                     await asyncio.to_thread(turn.add_pcm16, message["bytes"])
-                    route = turn.routing_snapshot()
+                    route = turn.routing_snapshot(preferred_language=preferred_language)
                     key = (route["language"], route["text"], route["stable"])
                     if route["text"] and key != turn.last_snapshot_key:
                         turn.last_snapshot_key = key
@@ -402,7 +445,14 @@ async def voice_socket(websocket: WebSocket):
             if not raw:
                 continue
             event = json.loads(raw)
-            if event.get("type") == "start":
+            if event.get("type") == "conversation_start":
+                history.clear()
+                preferred_language = None
+                await send_json(websocket, lock, {"type": "conversation_ready", "language": "auto"})
+            elif event.get("type") == "conversation_end":
+                history.clear()
+                preferred_language = None
+            elif event.get("type") == "start":
                 if turn:
                     await asyncio.to_thread(turn.stop)
                 turn = await asyncio.to_thread(VoiceTurn, app.state.transcribers)
@@ -410,7 +460,14 @@ async def voice_socket(websocket: WebSocket):
             elif event.get("type") == "stop" and turn:
                 await asyncio.to_thread(turn.stop)
                 ended = turn.ended_at or time.perf_counter()
-                route = turn.routing_snapshot(final=True)
+                route = turn.routing_snapshot(final=True, preferred_language=preferred_language)
+                if route["stable"] and route["confidence"] >= 0.58:
+                    preferred_language = route["language"]
+                log.info(
+                    "Language route=%s confidence=%.3f scores=%s candidates=%s debug=%s",
+                    route["language"], route["confidence"], route["scores"],
+                    route["candidates"], route["router_debug"],
+                )
                 rms = math.sqrt(turn.energy_sum / max(1, turn.audio_samples))
                 await send_json(websocket, lock, {"type": "language_detected", **route})
                 await send_json(websocket, lock, {
