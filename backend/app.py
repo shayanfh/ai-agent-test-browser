@@ -38,6 +38,13 @@ SYSTEM_PROMPTS = {
     "ar": os.getenv("SYSTEM_PROMPT_AR", "أنت مساعد صوتي موجز. أجب بالعربية بشكل طبيعي في جملة إلى ثلاث جمل قصيرة، وتجنب تنسيق Markdown."),
 }
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "160"))
+MAX_TOKENS_AR = int(os.getenv("MAX_TOKENS_AR", "48"))
+ARABIC_MAX_WORDS = int(os.getenv("ARABIC_MAX_WORDS", "22"))
+ARABIC_BREVITY_RULE = os.getenv(
+    "ARABIC_BREVITY_RULE",
+    "قاعدة إلزامية: أجب بجملة عربية واحدة قصيرة لا تتجاوز 22 كلمة، واسأل سؤالاً واحداً فقط في كل دور.",
+)
+SYSTEM_PROMPTS["ar"] = f"{SYSTEM_PROMPTS['ar']}\n{ARABIC_BREVITY_RULE}"
 ARABIC_RE = re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]")
 LATIN_RE = re.compile(r"[A-Za-z]")
 ROUTE_PHRASES = {
@@ -275,6 +282,25 @@ def split_tts_chunk(buffer: str, force: bool = False):
     return None, buffer
 
 
+def limit_streamed_response(answer: str, delta: str, language: str) -> tuple[str, bool]:
+    """Hard-stop verbose Arabic output before extra text reaches the UI/TTS."""
+    if language != "ar":
+        return delta, False
+    combined = answer + delta
+    cut = len(combined)
+    should_stop = False
+    sentence_end = re.search(r"[.!؟](?=\s|$)", combined)
+    if sentence_end:
+        cut = min(cut, sentence_end.end())
+        should_stop = True
+    words = list(re.finditer(r"\S+", combined))
+    if len(words) >= ARABIC_MAX_WORDS:
+        cut = min(cut, words[ARABIC_MAX_WORDS - 1].end())
+        should_stop = True
+    bounded = combined[:cut]
+    return bounded[len(answer):], should_stop
+
+
 def wav_duration(data: bytes) -> float:
     try:
         with wave.open(io.BytesIO(data), "rb") as wav:
@@ -364,7 +390,9 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
         payload = {
             "model": MODEL_NAMES[language],
             "messages": [{"role": "system", "content": SYSTEM_PROMPTS[language]}, *history],
-            "stream": True, "max_tokens": MAX_TOKENS, "temperature": 0.6,
+            "stream": True,
+            "max_tokens": MAX_TOKENS_AR if language == "ar" else MAX_TOKENS,
+            "temperature": 0.5 if language == "ar" else 0.6,
         }
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream("POST", f"{LLAMA_URLS[language]}/v1/chat/completions", json=payload) as response:
@@ -382,7 +410,12 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
                     if usage.get("completion_tokens"):
                         token_count = int(usage["completion_tokens"])
                     choices = event.get("choices") or [{}]
-                    delta = choices[0].get("delta", {}).get("content", "")
+                    raw_delta = choices[0].get("delta", {}).get("content", "")
+                    if not raw_delta:
+                        continue
+                    delta, should_stop = limit_streamed_response(answer, raw_delta, language)
+                    if not delta and should_stop:
+                        break
                     if not delta:
                         continue
                     now = time.perf_counter()
@@ -395,6 +428,8 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
                     chunk, tts_buffer = split_tts_chunk(tts_buffer)
                     if chunk:
                         await tts_queue.put(chunk)
+                    if should_stop:
+                        break
         chunk, tts_buffer = split_tts_chunk(tts_buffer, force=True)
         if chunk:
             await tts_queue.put(chunk)

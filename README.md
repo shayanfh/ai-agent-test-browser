@@ -63,6 +63,8 @@ Copy `.env.example` to `.env` and adjust:
 - `LLAMA_EN_THREADS`: CPU threads assigned to Gemma.
 - `LLAMA_AR_THREADS`: CPU threads assigned to RightNow Arabic. Only the routed model generates, but both remain resident.
 - `MAX_TOKENS`: maximum response length; shorter responses reduce total turn time.
+- `MAX_TOKENS_AR`: Arabic generation ceiling (default `48`).
+- `ARABIC_MAX_WORDS`: hard limit applied before Arabic text reaches TTS (default `22`, one sentence maximum).
 - `SYSTEM_PROMPT`: English voice assistant behavior.
 - `SYSTEM_PROMPT_AR`: Arabic voice assistant behavior.
 - `HTTP_PORT`: direct HTTP benchmark port (default `8080`).
