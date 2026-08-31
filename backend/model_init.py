@@ -3,7 +3,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from moonshine_voice import ModelArch, get_model_for_language
 
 root = Path(os.getenv("MODEL_ROOT", "/models"))
@@ -11,6 +11,7 @@ root = Path(os.getenv("MODEL_ROOT", "/models"))
 (root / "llm-qwen").mkdir(parents=True, exist_ok=True)
 (root / "piper").mkdir(parents=True, exist_ok=True)
 (root / "nabra").mkdir(parents=True, exist_ok=True)
+(root / "stt-distil-en").mkdir(parents=True, exist_ok=True)
 
 print("Downloading Gemma 3 1B Q4_K_M…", flush=True)
 gguf = hf_hub_download(repo_id="ggml-org/gemma-3-1b-it-GGUF", filename="gemma-3-1b-it-Q4_K_M.gguf", local_dir=root / "llm")
@@ -28,6 +29,12 @@ for language in ("en", "ar"):
     moonshine_path, arch = get_model_for_language(language, ModelArch.TINY_STREAMING)
     moonshine[language] = {"path": str(moonshine_path), "arch": int(arch)}
 
+print("Downloading Distil-Whisper large-v3 English (CTranslate2)…", flush=True)
+distil_english = snapshot_download(
+    repo_id="Systran/faster-distil-whisper-large-v3",
+    local_dir=root / "stt-distil-en",
+)
+
 voice = "en_US-amy-medium"
 print(f"Downloading Piper voice: {voice}…", flush=True)
 subprocess.run(["python", "-m", "piper.download_voices", "--data-dir", str(root / "piper"), voice], check=True)
@@ -44,6 +51,7 @@ for filename in ("kokoro_arabic.pth", "af_msa.pt", "config.json"):
 manifest = {
     "llm": {"gemma": str(gguf), "qwen": str(qwen_gguf)},
     "moonshine": moonshine,
+    "stt_final": {"en": str(distil_english), "ar": moonshine["ar"]["path"]},
     "tts": {"en": {"engine": "piper", "voice": voice}, "ar": {"engine": "nabra", "files": nabra}},
 }
 (root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")

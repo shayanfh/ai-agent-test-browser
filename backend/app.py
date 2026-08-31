@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 import httpx
 import numpy as np
+from faster_whisper import WhisperModel
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from moonshine_voice import ModelArch, Transcriber, TranscriptEventListener, get_model_for_language
@@ -50,6 +51,8 @@ MAX_TOKENS_AR = int(os.getenv("MAX_TOKENS_AR", "48"))
 ARABIC_MAX_WORDS = int(os.getenv("ARABIC_MAX_WORDS", "22"))
 HISTORY_MAX_MESSAGES = max(8, int(os.getenv("HISTORY_MAX_MESSAGES", "16")))
 MEMORY_MAX_ITEMS = max(4, int(os.getenv("MEMORY_MAX_ITEMS", "12")))
+DISTIL_WHISPER_PATH = os.getenv("DISTIL_WHISPER_PATH", "/models/stt-distil-en")
+DISTIL_WHISPER_THREADS = max(1, int(os.getenv("DISTIL_WHISPER_THREADS", "4")))
 ARABIC_BREVITY_RULE = os.getenv(
     "ARABIC_BREVITY_RULE",
     "قاعدة إلزامية: أجب بجملة عربية واحدة قصيرة لا تتجاوز 22 كلمة، واسأل سؤالاً واحداً فقط في كل دور.",
@@ -84,6 +87,24 @@ async def lifespan(app: FastAPI):
             options["save_input_wav_path"] = f"{debug_audio_path}.{language}.wav"
         app.state.transcribers[language] = Transcriber(model_path=model_path, model_arch=model_arch, options=options)
         log.info("Moonshine %s ready from %s", language, model_path)
+    log.info("Preloading Distil-Whisper large-v3 English from %s", DISTIL_WHISPER_PATH)
+    app.state.distil_english = await asyncio.to_thread(
+        WhisperModel,
+        DISTIL_WHISPER_PATH,
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=DISTIL_WHISPER_THREADS,
+        num_workers=1,
+        local_files_only=True,
+    )
+    app.state.distil_lock = asyncio.Lock()
+    log.info("Warming Distil-Whisper large-v3 English")
+    await asyncio.to_thread(
+        transcribe_distil_english,
+        app.state.distil_english,
+        np.zeros(8000, dtype="<i2").tobytes(),
+    )
+    log.info("Distil-Whisper large-v3 English ready (int8, threads=%d)", DISTIL_WHISPER_THREADS)
     yield
     for transcriber in app.state.transcribers.values():
         transcriber.close()
@@ -115,6 +136,7 @@ async def health():
         "status": "ok" if ready else "warming", "stt": True,
         "llm": llm_ready, "tts": tts_ready, "routes": downstream,
         "languages": list(LANGUAGES),
+        "stt_models": {"partial_router": "moonshine-tiny-streaming", "en_final": "distil-large-v3", "ar_final": "moonshine-streaming-tiny-ar-27m"},
     }
     return JSONResponse(payload, status_code=200 if ready else 503)
 
@@ -201,6 +223,7 @@ class VoiceTurn:
     energy_sum: float = 0.0
     candidates: dict[str, TranscriptCandidate] = field(default_factory=lambda: {language: TranscriptCandidate() for language in LANGUAGES})
     last_snapshot_key: tuple = field(default_factory=tuple)
+    pcm16: bytearray = field(default_factory=bytearray)
 
     def __post_init__(self):
         self.streams = {}
@@ -214,6 +237,7 @@ class VoiceTurn:
             self.listeners[language] = listener
 
     def add_pcm16(self, raw: bytes):
+        self.pcm16.extend(raw)
         samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
         self.audio_samples += len(samples)
         if len(samples):
@@ -222,6 +246,13 @@ class VoiceTurn:
         audio = samples.tolist()
         for stream in self.streams.values():
             stream.add_audio(audio, 16000)
+
+    def replace_final(self, language: str, text: str):
+        candidate = self.candidates[language]
+        candidate.final_text = text.strip()
+        candidate.latest_text = text.strip()
+        candidate.updates += 1
+        candidate.stability = max(candidate.stability, 0.95)
 
     def stop(self):
         self.ended_at = time.perf_counter()
@@ -276,6 +307,24 @@ class VoiceTurn:
 async def send_json(websocket: WebSocket, lock: asyncio.Lock, payload: dict):
     async with lock:
         await websocket.send_json(payload)
+
+
+def transcribe_distil_english(model: WhisperModel, pcm16: bytes) -> str:
+    audio = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+    if not len(audio):
+        return ""
+    segments, _ = model.transcribe(
+        audio,
+        language="en",
+        task="transcribe",
+        beam_size=1,
+        best_of=1,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        without_timestamps=True,
+        vad_filter=False,
+    )
+    return " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
 
 
 def remember_utterance(memory: list[str], text: str):
@@ -513,7 +562,7 @@ async def voice_socket(websocket: WebSocket):
     turn: VoiceTurn | None = None
     await websocket.send_json({
         "type": "hello", "sample_rate": 16000, "languages": list(LANGUAGES),
-        "stt": {"en": "moonshine-tiny-streaming", "ar": "moonshine-streaming-tiny-ar-27m"},
+        "stt": {"partial_router": "moonshine-tiny-streaming-en-ar", "en_final": "distil-large-v3", "ar_final": "moonshine-streaming-tiny-ar-27m"},
         "llm": {
             "selected": selected_model,
             "models": [{"id": key, "name": value["name"]} for key, value in LLM_MODELS.items()],
@@ -559,6 +608,27 @@ async def voice_socket(websocket: WebSocket):
                 await asyncio.to_thread(turn.stop)
                 ended = turn.ended_at or time.perf_counter()
                 route = turn.routing_snapshot(final=True, preferred_language=preferred_language)
+                stt_model = "moonshine-streaming-tiny-ar-27m" if route["language"] == "ar" else "moonshine-tiny-streaming-fallback"
+                distil_final_ms = None
+                if route["language"] == "en":
+                    distil_started = time.perf_counter()
+                    try:
+                        async with app.state.distil_lock:
+                            refined_text = await asyncio.to_thread(
+                                transcribe_distil_english,
+                                app.state.distil_english,
+                                bytes(turn.pcm16),
+                            )
+                        distil_final_ms = (time.perf_counter() - distil_started) * 1000
+                        if refined_text:
+                            turn.replace_final("en", refined_text)
+                            route = turn.routing_snapshot(final=True, preferred_language=preferred_language)
+                            if route["language"] == "en":
+                                stt_model = "distil-large-v3"
+                            else:
+                                stt_model = "moonshine-streaming-tiny-ar-27m"
+                    except Exception:
+                        log.exception("Distil-Whisper English final transcription failed; using Moonshine fallback")
                 if route["stable"] and route["confidence"] >= 0.58:
                     preferred_language = route["language"]
                 log.info(
@@ -572,6 +642,7 @@ async def voice_socket(websocket: WebSocket):
                     "type": "stt_final", **route,
                     "speech_duration_ms": turn.audio_samples / 16.0,
                     "stt_final_ms": (time.perf_counter() - ended) * 1000,
+                    "stt_model": stt_model, "distil_final_ms": distil_final_ms,
                     "audio_peak": turn.peak, "audio_rms": rms,
                 })
                 await process_turn(websocket, lock, turn, history, memory, route, selected_model)

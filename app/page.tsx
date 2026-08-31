@@ -25,6 +25,7 @@ export default function Home() {
   const [routeLanguage, setRouteLanguage] = useState<RouteLanguage>('auto');
   const [routeConfidence, setRouteConfidence] = useState(0);
   const [selectedModel, setSelectedModel] = useState<LlmModel>('gemma');
+  const [sttModel, setSttModel] = useState('Moonshine router');
   const socketRef = useRef<WebSocket | null>(null);
   const recordingRef = useRef(false);
   const callActiveRef = useRef(false);
@@ -90,7 +91,7 @@ export default function Home() {
           case 'hello': if (event.llm?.selected === 'gemma' || event.llm?.selected === 'qwen') setSelectedModel(event.llm.selected); break;
           case 'stt_partial': setTranscript(event.text || 'Listening…'); if (event.stable) { setRouteLanguage(event.language); setRouteConfidence(event.confidence || 0); } setMetrics((m) => ({ ...m, firstPartial: m.firstPartial ?? event.first_partial_ms })); break;
           case 'language_detected': setRouteLanguage(event.language); setRouteConfidence(event.confidence || 0); break;
-          case 'stt_final': setTranscript(event.text || 'No speech detected'); setRouteLanguage(event.language || 'auto'); setRouteConfidence(event.confidence || 0); setMetrics((m) => ({ ...m, speechDuration: event.speech_duration_ms, sttFinal: event.stt_final_ms })); setStatus('thinking'); break;
+          case 'stt_final': setTranscript(event.text || 'No speech detected'); setRouteLanguage(event.language || 'auto'); setRouteConfidence(event.confidence || 0); setSttModel(event.stt_model === 'distil-large-v3' ? 'Distil Large v3' : event.language === 'ar' ? 'Moonshine Arabic' : 'Moonshine fallback'); setMetrics((m) => ({ ...m, speechDuration: event.speech_duration_ms, sttFinal: event.stt_final_ms })); setStatus('thinking'); break;
           case 'stt_ignored': setTranscript('Listening for speech…'); setError(''); listenAfterRef.current = performance.now() + 350; setStatus('ready'); break;
           case 'conversation_ready': if (event.model === 'gemma' || event.model === 'qwen') setSelectedModel(event.model); break;
           case 'llm_token': setAnswer((text) => text + event.delta); setMetrics((m) => ({ ...m, ttft: m.ttft ?? event.ttft_ms })); break;
@@ -156,6 +157,7 @@ export default function Home() {
         setMetrics(emptyMetrics);
         setRouteLanguage('auto');
         setRouteConfidence(0);
+        setSttModel('Moonshine router');
         setTranscript('Listening…');
         setAnswer('');
         setError('');
@@ -247,7 +249,7 @@ export default function Home() {
       <section className="workspace">
         <div className="conversation">
           <div className="pipeline" aria-label="Active model pipeline">
-            <div><span className="step">01</span><p>Speech + language<strong>Moonshine Tiny · EN + AR</strong></p></div><b>→</b>
+            <div><span className="step">01</span><p>Speech + language<strong>Distil EN · Moonshine AR</strong></p></div><b>→</b>
             <div><span className="step">02</span><p>Language model<strong>{llmLabel}</strong></p></div><b>→</b>
             <div><span className="step">03</span><p>Text to speech<strong>Piper Amy / Nabra-82M</strong></p></div>
           </div>
@@ -259,7 +261,7 @@ export default function Home() {
         </div>
         <aside className="dashboard"><div className="dashboard-head"><div><p className="eyebrow">LIVE MEASUREMENTS</p><h2>Latency</h2></div><span className={`route-badge ${routeLanguage}`}>{routeLabel}{routeConfidence > 0 ? ` · ${Math.round(routeConfidence * 100)}%` : ''}</span></div>
           <div className="total"><span>End speech → first audio</span><strong>{metrics.total === undefined ? '—' : metrics.total.toFixed(0)}<small>{metrics.total === undefined ? '' : ' ms'}</small></strong><div><i style={{ width: `${Math.min(100, (metrics.total ?? 0) / 10)}%` }} /></div></div>
-          <div className="metric-group"><h3><span>STT</span>Moonshine</h3><Metric label="Speech duration" value={metrics.speechDuration} /><Metric label="First partial" value={metrics.firstPartial} /><Metric label="Final after end" value={metrics.sttFinal} /></div>
+          <div className="metric-group"><h3><span>STT</span>{sttModel}</h3><Metric label="Speech duration" value={metrics.speechDuration} /><Metric label="First partial" value={metrics.firstPartial} /><Metric label="Final after end" value={metrics.sttFinal} /></div>
           <div className="metric-group"><h3><span>LLM</span>{llmLabel}</h3><Metric label="Time to first token" value={metrics.ttft} /><Metric label="Generation speed" value={metrics.tokensPerSecond} unit="tok/s" /><Metric label="Total generation" value={metrics.llmTotal} /></div>
           <div className="metric-group"><h3><span>TTS</span>{ttsLabel}</h3><Metric label="Time to first audio" value={metrics.ttsFirstAudio} /><Metric label="Generation speed" value={metrics.ttsRealtime} unit="× realtime" /></div>
         </aside>
