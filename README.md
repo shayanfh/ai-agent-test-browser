@@ -2,7 +2,7 @@
 
 Self-hosted latency lab for a fully local voice pipeline:
 
-`Browser PCM → Moonshine partial language router → Distil-Whisper EN / Moonshine AR final → selected Gemma or Qwen → Piper EN / Nabra Arabic → Browser audio`
+`Browser PCM → Moonshine Medium Streaming EN / Moonshine Streaming AR → selected Gemma or Qwen → Piper EN / Nabra Arabic → Browser audio`
 
 The browser streams mono 16 kHz PCM over WebSocket. The backend reports timestamps for partial/final STT, LLM TTFT and throughput, TTS generation, and the key end-of-speech-to-first-audio metric.
 
@@ -11,8 +11,8 @@ The browser streams mono 16 kHz PCM over WebSocket. The backend reports timestam
 - Linux x86_64 or ARM64
 - Docker Engine 24+ with Compose v2
 - 8 CPU cores recommended
-- 10 GB RAM minimum; 16 GB recommended
-- About 7 GB free disk for images, runtimes, and model weights
+- 8 GB RAM minimum; 12 GB recommended
+- About 5 GB free disk for images, runtimes, and model weights
 - A domain pointing at the server for microphone access in production (browsers require HTTPS outside localhost)
 
 No Python, Node.js, model runtime, or model file needs to be installed on the host.
@@ -25,7 +25,7 @@ docker compose up -d --build
 docker compose logs -f model-init llama-gemma llama-qwen piper nabra backend
 ```
 
-The first start downloads both Moonshine router models, Distil-Whisper large-v3 English, Gemma 3 1B Q4_K_M, Qwen3-1.7B Q4_K_M, Piper Amy, and Nabra-82M into the persistent `models` volume. All inference models stay preloaded. Moonshine supplies low-latency partials for language routing; after English speech ends, Distil-Whisper replaces the English transcript before it reaches the LLM. This can take several minutes. Later starts reuse the model files. Open `http://SERVER_IP:8080` for a LAN smoke test.
+The first start downloads Moonshine Medium Streaming English, Moonshine Streaming Arabic, Gemma 3 1B Q4_K_M, Qwen3-1.7B Q4_K_M, Piper Amy, and Nabra-82M into the persistent `models` volume. Both STT models stream partial and final transcripts directly; there is no slower second-pass STT. The initializer removes the retired Distil-Whisper and Tiny Streaming English files. This can take several minutes. Later starts reuse the model files. Open `http://SERVER_IP:8080` for a LAN smoke test.
 
 The backend has write access to this volume because Moonshine creates temporary lock files while opening cached model assets. The llama.cpp, Piper, and Nabra containers mount the same assets read-only.
 
@@ -70,7 +70,6 @@ Copy `.env.example` to `.env` and adjust:
 - `MEMORY_MAX_ITEMS`: customer utterances retained separately and injected into the prompt so collected details are not requested again (default `12`).
 - `NABRA_THREADS`: CPU threads assigned to Arabic speech synthesis (default `4`).
 - `NABRA_SPEED`: Nabra speaking speed (default `1.0`).
-- `DISTIL_WHISPER_THREADS`: CPU threads assigned to English final STT (default `4`).
 - `SYSTEM_PROMPT`: English voice assistant behavior.
 - `SYSTEM_PROMPT_AR`: Arabic voice assistant behavior.
 - `HTTP_PORT`: direct HTTP benchmark port (default `8080`).
@@ -80,11 +79,11 @@ Raw latency is best measured with the browser and all containers on the same ser
 
 ## Model sources
 
-- Moonshine Tiny Streaming English and Moonshine Streaming Tiny Arabic 27M process each utterance for partial language routing. Arabic final STT remains Moonshine.
-- English final STT uses `Systran/faster-distil-whisper-large-v3` through Faster-Whisper with CPU `int8` inference.
+- English STT uses Moonshine Medium Streaming (245M) for both partial and final transcripts.
+- Arabic STT uses the available Moonshine Streaming Arabic model; Moonshine Medium Streaming is currently English-only.
 - Gemma is `ggml-org/gemma-3-1b-it-GGUF`, file `gemma-3-1b-it-Q4_K_M.gguf`.
 - The comparison model is `ggml-org/Qwen3-1.7B-GGUF`, file `Qwen3-1.7B-Q4_K_M.gguf`. Thinking is disabled for low-latency voice responses.
 - English TTS uses Piper `en_US-amy-medium`.
 - Arabic TTS uses `oddadmix/Nabra-82M-v0.1`, the `af_msa` female voice, and Camel Tools MSA diacritization.
 
-Gemma is subject to its model license; Distil-Whisper is MIT; Qwen3 and Nabra are Apache-2.0; Piper 1 is GPL-3.0-or-later. The installed Moonshine Arabic runtime currently prints a Moonshine Community License warning, so verify those terms before commercial use even though the public checkpoint card lists MIT.
+Gemma is subject to its model license; Qwen3 and Nabra are Apache-2.0; Piper 1 is GPL-3.0-or-later. The installed Moonshine Arabic runtime currently prints a Moonshine Community License warning, so verify those terms before commercial use even though the public checkpoint card lists MIT.

@@ -132,8 +132,6 @@ services:
       HISTORY_MAX_MESSAGES: "${HISTORY_MAX_MESSAGES:-16}"
       MEMORY_MAX_ITEMS: "${MEMORY_MAX_ITEMS:-12}"
       MOONSHINE_VAD_THRESHOLD: "${MOONSHINE_VAD_THRESHOLD:-0.35}"
-      DISTIL_WHISPER_PATH: /models/stt-distil-en
-      DISTIL_WHISPER_THREADS: "${DISTIL_WHISPER_THREADS:-4}"
       XDG_CACHE_HOME: /models/cache
       HF_HOME: /models/huggingface
       SYSTEM_PROMPT: "${SYSTEM_PROMPT:-You are a concise voice assistant. Reply naturally in one to three short sentences. Avoid markdown.}"

@@ -25,7 +25,7 @@ export default function Home() {
   const [routeLanguage, setRouteLanguage] = useState<RouteLanguage>('auto');
   const [routeConfidence, setRouteConfidence] = useState(0);
   const [selectedModel, setSelectedModel] = useState<LlmModel>('gemma');
-  const [sttModel, setSttModel] = useState('Moonshine router');
+  const [sttModel, setSttModel] = useState('Moonshine Streaming');
   const socketRef = useRef<WebSocket | null>(null);
   const recordingRef = useRef(false);
   const callActiveRef = useRef(false);
@@ -91,7 +91,7 @@ export default function Home() {
           case 'hello': if (event.llm?.selected === 'gemma' || event.llm?.selected === 'qwen') setSelectedModel(event.llm.selected); break;
           case 'stt_partial': setTranscript(event.text || 'Listening…'); if (event.stable) { setRouteLanguage(event.language); setRouteConfidence(event.confidence || 0); } setMetrics((m) => ({ ...m, firstPartial: m.firstPartial ?? event.first_partial_ms })); break;
           case 'language_detected': setRouteLanguage(event.language); setRouteConfidence(event.confidence || 0); break;
-          case 'stt_final': setTranscript(event.text || 'No speech detected'); setRouteLanguage(event.language || 'auto'); setRouteConfidence(event.confidence || 0); setSttModel(event.stt_model === 'distil-large-v3' ? 'Distil Large v3' : event.language === 'ar' ? 'Moonshine Arabic' : 'Moonshine fallback'); setMetrics((m) => ({ ...m, speechDuration: event.speech_duration_ms, sttFinal: event.stt_final_ms })); setStatus('thinking'); break;
+          case 'stt_final': setTranscript(event.text || 'No speech detected'); setRouteLanguage(event.language || 'auto'); setRouteConfidence(event.confidence || 0); setSttModel(event.language === 'ar' ? 'Moonshine Arabic' : 'Moonshine Medium'); setMetrics((m) => ({ ...m, speechDuration: event.speech_duration_ms, sttFinal: event.stt_final_ms })); setStatus('thinking'); break;
           case 'stt_ignored': setTranscript('Listening for speech…'); setError(''); listenAfterRef.current = performance.now() + 350; setStatus('ready'); break;
           case 'conversation_ready': if (event.model === 'gemma' || event.model === 'qwen') setSelectedModel(event.model); break;
           case 'llm_token': setAnswer((text) => text + event.delta); setMetrics((m) => ({ ...m, ttft: m.ttft ?? event.ttft_ms })); break;
@@ -157,7 +157,7 @@ export default function Home() {
         setMetrics(emptyMetrics);
         setRouteLanguage('auto');
         setRouteConfidence(0);
-        setSttModel('Moonshine router');
+        setSttModel('Moonshine Streaming');
         setTranscript('Listening…');
         setAnswer('');
         setError('');
@@ -249,7 +249,7 @@ export default function Home() {
       <section className="workspace">
         <div className="conversation">
           <div className="pipeline" aria-label="Active model pipeline">
-            <div><span className="step">01</span><p>Speech + language<strong>Distil EN · Moonshine AR</strong></p></div><b>→</b>
+            <div><span className="step">01</span><p>Speech + language<strong>Moonshine Medium EN · Arabic</strong></p></div><b>→</b>
             <div><span className="step">02</span><p>Language model<strong>{llmLabel}</strong></p></div><b>→</b>
             <div><span className="step">03</span><p>Text to speech<strong>Piper Amy / Nabra-82M</strong></p></div>
           </div>
