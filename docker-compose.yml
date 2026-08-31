@@ -90,39 +90,26 @@ services:
       start_period: 20s
     restart: unless-stopped
 
-  piper-ar:
+  nabra:
     build:
       context: .
-      dockerfile: backend/Dockerfile
-    command:
-      - python
-      - -m
-      - piper.http_server
-      - --host
-      - 0.0.0.0
-      - --port
-      - "5000"
-      - --data-dir
-      - /models/piper
-      - -m
-      - ar_JO-kareem-medium
-      - --length-scale
-      - "${PIPER_AR_LENGTH_SCALE:-0.92}"
-      - --noise-scale
-      - "${PIPER_AR_NOISE_SCALE:-0.75}"
-      - --noise-w-scale
-      - "${PIPER_AR_NOISE_W_SCALE:-0.90}"
+      dockerfile: nabra/Dockerfile
+    environment:
+      NABRA_MODEL_ROOT: /models/nabra
+      NABRA_THREADS: "${NABRA_THREADS:-4}"
+      NABRA_SPEED: "${NABRA_SPEED:-1.0}"
+      HF_HOME: /models/huggingface
     volumes:
       - models:/models:ro
     depends_on:
       model-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-sS", "-o", "/dev/null", "http://localhost:5000/"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 20s
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
     restart: unless-stopped
 
   backend:
@@ -133,10 +120,12 @@ services:
       LLAMA_EN_URL: http://llama:8080
       LLAMA_AR_URL: http://llama-ar:8080
       PIPER_EN_URL: http://piper:5000
-      PIPER_AR_URL: http://piper-ar:5000
+      NABRA_URL: http://nabra:8000
       MODEL_NAME_EN: gemma-3-1b-it
       MODEL_NAME_AR: RightNow-Arabic-0.5B-Turbo
       MAX_TOKENS: "${MAX_TOKENS:-160}"
+      MAX_TOKENS_AR: "${MAX_TOKENS_AR:-48}"
+      ARABIC_MAX_WORDS: "${ARABIC_MAX_WORDS:-22}"
       MOONSHINE_VAD_THRESHOLD: "${MOONSHINE_VAD_THRESHOLD:-0.35}"
       XDG_CACHE_HOME: /models/cache
       HF_HOME: /models/huggingface
@@ -154,7 +143,7 @@ services:
         condition: service_healthy
       piper:
         condition: service_healthy
-      piper-ar:
+      nabra:
         condition: service_healthy
     healthcheck:
       # Container readiness must only test FastAPI itself. Downstream model

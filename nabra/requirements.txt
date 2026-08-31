@@ -1,0 +1,8 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+huggingface-hub==0.34.4
+numpy
+soundfile==0.13.1
+camel-tools==1.6.0
+misaki[en]>=0.9.4
+kokoro @ git+https://github.com/Oddadmix/kokoro.git@main

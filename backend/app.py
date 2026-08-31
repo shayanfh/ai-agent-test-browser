@@ -25,10 +25,11 @@ LLAMA_URLS = {
     "en": os.getenv("LLAMA_EN_URL", os.getenv("LLAMA_URL", "http://llama:8080")),
     "ar": os.getenv("LLAMA_AR_URL", "http://llama-ar:8080"),
 }
-PIPER_URLS = {
+TTS_URLS = {
     "en": os.getenv("PIPER_EN_URL", os.getenv("PIPER_URL", "http://piper:5000")),
-    "ar": os.getenv("PIPER_AR_URL", "http://piper-ar:5000"),
+    "ar": os.getenv("NABRA_URL", "http://nabra:8000"),
 }
+TTS_NAMES = {"en": "Piper Amy", "ar": "Nabra-82M"}
 MODEL_NAMES = {
     "en": os.getenv("MODEL_NAME_EN", os.getenv("MODEL_NAME", "gemma-3-1b-it")),
     "ar": os.getenv("MODEL_NAME_AR", "RightNow-Arabic-0.5B-Turbo"),
@@ -88,8 +89,8 @@ async def health():
     checks = {
         "llm_en": f"{LLAMA_URLS['en']}/health",
         "llm_ar": f"{LLAMA_URLS['ar']}/health",
-        "tts_en": f"{PIPER_URLS['en']}/",
-        "tts_ar": f"{PIPER_URLS['ar']}/",
+        "tts_en": f"{TTS_URLS['en']}/",
+        "tts_ar": f"{TTS_URLS['ar']}/health",
     }
     async with httpx.AsyncClient(timeout=2.0) as client:
         for name, url in checks.items():
@@ -320,7 +321,11 @@ async def tts_worker(websocket: WebSocket, lock: asyncio.Lock, queue: asyncio.Qu
                 return
             started = time.perf_counter()
             try:
-                response = await client.post(f"{PIPER_URLS[language]}/", json={"text": text})
+                endpoint = "/synthesize" if language == "ar" else "/"
+                response = await client.post(
+                    f"{TTS_URLS[language]}{endpoint}",
+                    json={"text": text},
+                )
                 response.raise_for_status()
                 audio = response.content
                 finished = time.perf_counter()
@@ -338,7 +343,7 @@ async def tts_worker(websocket: WebSocket, lock: asyncio.Lock, queue: asyncio.Qu
                 first = False
                 sequence += 1
             except Exception as exc:
-                await send_json(websocket, lock, {"type": "error", "stage": "tts", "message": f"Piper {language} failed: {exc}"})
+                await send_json(websocket, lock, {"type": "error", "stage": "tts", "message": f"{TTS_NAMES[language]} failed: {exc}"})
             finally:
                 queue.task_done()
 
@@ -462,7 +467,7 @@ async def voice_socket(websocket: WebSocket):
         "type": "hello", "sample_rate": 16000, "languages": list(LANGUAGES),
         "stt": {"en": "moonshine-tiny-streaming", "ar": "moonshine-streaming-tiny-ar-27m"},
         "llm": MODEL_NAMES,
-        "tts": {"en": "en_US-amy-medium", "ar": "ar_JO-kareem-medium"},
+        "tts": {"en": "en_US-amy-medium", "ar": "Nabra-82M-v0.1 / af_msa"},
     })
     try:
         while True:

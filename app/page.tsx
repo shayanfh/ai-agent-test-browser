@@ -236,7 +236,7 @@ export default function Home() {
           <div className="pipeline" aria-label="Active model pipeline">
             <div><span className="step">01</span><p>Speech + language<strong>Moonshine Tiny · EN + AR</strong></p></div><b>→</b>
             <div><span className="step">02</span><p>Language model<strong>{llmLabel}</strong></p></div><b>→</b>
-            <div><span className="step">03</span><p>Text to speech<strong>Piper · Amy / Kareem</strong></p></div>
+            <div><span className="step">03</span><p>Text to speech<strong>Piper Amy / Nabra-82M</strong></p></div>
           </div>
           <div className="turn"><div className="speaker"><span>YOU</span><i /></div><p dir="auto" className={status === 'recording' ? 'live-text' : ''}>{transcript}</p></div>
           <div className="turn answer"><div className="speaker"><span>AI</span><i /></div><p dir="auto">{answer || (status === 'thinking' ? 'Generating a response…' : 'The model response will appear here.')}</p></div>
