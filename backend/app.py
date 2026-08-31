@@ -21,19 +21,26 @@ log = logging.getLogger("voicebench")
 
 LANGUAGES = ("en", "ar")
 LANGUAGE_NAMES = {"en": "English", "ar": "العربية"}
-LLAMA_URLS = {
-    "en": os.getenv("LLAMA_EN_URL", os.getenv("LLAMA_URL", "http://llama:8080")),
-    "ar": os.getenv("LLAMA_AR_URL", "http://llama-ar:8080"),
+LLM_MODELS = {
+    "gemma": {
+        "name": "Gemma 3 1B",
+        "api_model": os.getenv("GEMMA_MODEL_NAME", "gemma-3-1b-it"),
+        "url": os.getenv("GEMMA_URL", "http://llama-gemma:8080"),
+    },
+    "qwen": {
+        "name": "Qwen3-1.7B",
+        "api_model": os.getenv("QWEN_MODEL_NAME", "Qwen3-1.7B"),
+        "url": os.getenv("QWEN_URL", "http://llama-qwen:8080"),
+    },
 }
+DEFAULT_LLM_MODEL = os.getenv("DEFAULT_LLM_MODEL", "gemma")
+if DEFAULT_LLM_MODEL not in LLM_MODELS:
+    DEFAULT_LLM_MODEL = "gemma"
 TTS_URLS = {
     "en": os.getenv("PIPER_EN_URL", os.getenv("PIPER_URL", "http://piper:5000")),
     "ar": os.getenv("NABRA_URL", "http://nabra:8000"),
 }
 TTS_NAMES = {"en": "Piper Amy", "ar": "Nabra-82M"}
-MODEL_NAMES = {
-    "en": os.getenv("MODEL_NAME_EN", os.getenv("MODEL_NAME", "gemma-3-1b-it")),
-    "ar": os.getenv("MODEL_NAME_AR", "RightNow-Arabic-0.5B-Turbo"),
-}
 SYSTEM_PROMPTS = {
     "en": os.getenv("SYSTEM_PROMPT_EN", os.getenv("SYSTEM_PROMPT", "You are a concise voice assistant. Reply naturally in one to three short sentences. Avoid markdown.")),
     "ar": os.getenv("SYSTEM_PROMPT_AR", "أنت مساعد صوتي موجز. أجب بالعربية بشكل طبيعي في جملة إلى ثلاث جمل قصيرة، وتجنب تنسيق Markdown."),
@@ -87,8 +94,8 @@ app = FastAPI(title="VoiceBench", version="2.0.0", lifespan=lifespan)
 async def health():
     downstream = {}
     checks = {
-        "llm_en": f"{LLAMA_URLS['en']}/health",
-        "llm_ar": f"{LLAMA_URLS['ar']}/health",
+        "llm_gemma": f"{LLM_MODELS['gemma']['url']}/health",
+        "llm_qwen": f"{LLM_MODELS['qwen']['url']}/health",
         "tts_en": f"{TTS_URLS['en']}/",
         "tts_ar": f"{TTS_URLS['ar']}/health",
     }
@@ -99,7 +106,7 @@ async def health():
                 downstream[name] = response.status_code < 500
             except httpx.HTTPError:
                 downstream[name] = False
-    llm_ready = downstream["llm_en"] and downstream["llm_ar"]
+    llm_ready = downstream["llm_gemma"] and downstream["llm_qwen"]
     tts_ready = downstream["tts_en"] and downstream["tts_ar"]
     ready = llm_ready and tts_ready
     payload = {
@@ -358,8 +365,9 @@ def probable_silence_hallucination(text: str, language: str, rms: float) -> bool
     return normalized in common and rms < 0.022
 
 
-async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn, history: list[dict], route: dict):
+async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn, history: list[dict], route: dict, model_key: str):
     language = route["language"]
+    model = LLM_MODELS[model_key]
     text = route["text"]
     duration = turn.audio_samples / 16000
     rms = math.sqrt(turn.energy_sum / max(1, turn.audio_samples))
@@ -393,17 +401,19 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
     worker = asyncio.create_task(tts_worker(websocket, lock, tts_queue, turn.ended_at or llm_started, language))
     try:
         payload = {
-            "model": MODEL_NAMES[language],
+            "model": model["api_model"],
             "messages": [{"role": "system", "content": SYSTEM_PROMPTS[language]}, *history],
             "stream": True,
             "max_tokens": MAX_TOKENS_AR if language == "ar" else MAX_TOKENS,
             "temperature": 0.5 if language == "ar" else 0.6,
         }
+        if model_key == "qwen":
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream("POST", f"{LLAMA_URLS[language]}/v1/chat/completions", json=payload) as response:
+            async with client.stream("POST", f"{model['url']}/v1/chat/completions", json=payload) as response:
                 if not response.is_success:
                     body = (await response.aread()).decode("utf-8", errors="replace")
-                    raise RuntimeError(f"llama.cpp {language} returned HTTP {response.status_code}: {body[:800]}")
+                    raise RuntimeError(f"llama.cpp {model_key} returned HTTP {response.status_code}: {body[:800]}")
                 async for line in response.aiter_lines():
                     if not line.startswith("data: ") or line == "data: [DONE]":
                         continue
@@ -429,7 +439,7 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
                         token_count += 1
                     answer += delta
                     tts_buffer += delta
-                    await send_json(websocket, lock, {"type": "llm_token", "delta": delta, "language": language, "ttft_ms": (first_token_at - llm_started) * 1000})
+                    await send_json(websocket, lock, {"type": "llm_token", "delta": delta, "language": language, "model": model_key, "ttft_ms": (first_token_at - llm_started) * 1000})
                     chunk, tts_buffer = split_tts_chunk(tts_buffer)
                     if chunk:
                         await tts_queue.put(chunk)
@@ -440,18 +450,18 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
             await tts_queue.put(chunk)
         llm_finished = time.perf_counter()
         elapsed = max(0.001, llm_finished - (first_token_at or llm_started))
-        await send_json(websocket, lock, {"type": "llm_done", "language": language, "total_ms": (llm_finished - llm_started) * 1000, "tokens": token_count, "tokens_per_second": server_tokens_per_second or token_count / elapsed})
+        await send_json(websocket, lock, {"type": "llm_done", "language": language, "model": model_key, "total_ms": (llm_finished - llm_started) * 1000, "tokens": token_count, "tokens_per_second": server_tokens_per_second or token_count / elapsed})
         if answer:
             history.append({"role": "assistant", "content": answer})
     except Exception as exc:
         if history and history[-1].get("role") == "user" and history[-1].get("content") == text:
             history.pop()
-        await send_json(websocket, lock, {"type": "error", "stage": "llm", "message": f"{MODEL_NAMES[language]} failed: {exc}"})
+        await send_json(websocket, lock, {"type": "error", "stage": "llm", "message": f"{model['name']} failed: {exc}"})
     finally:
         await tts_queue.put(None)
         await tts_queue.join()
         await worker
-        await send_json(websocket, lock, {"type": "turn_done", "language": language})
+        await send_json(websocket, lock, {"type": "turn_done", "language": language, "model": model_key})
 
 
 @app.websocket("/ws/voice")
@@ -462,11 +472,15 @@ async def voice_socket(websocket: WebSocket):
     # language mid-call without losing the previous order/context.
     history: list[dict] = []
     preferred_language: str | None = None
+    selected_model = DEFAULT_LLM_MODEL
     turn: VoiceTurn | None = None
     await websocket.send_json({
         "type": "hello", "sample_rate": 16000, "languages": list(LANGUAGES),
         "stt": {"en": "moonshine-tiny-streaming", "ar": "moonshine-streaming-tiny-ar-27m"},
-        "llm": MODEL_NAMES,
+        "llm": {
+            "selected": selected_model,
+            "models": [{"id": key, "name": value["name"]} for key, value in LLM_MODELS.items()],
+        },
         "tts": {"en": "en_US-amy-medium", "ar": "Nabra-82M-v0.1 / af_msa"},
     })
     try:
@@ -488,7 +502,12 @@ async def voice_socket(websocket: WebSocket):
             if event.get("type") == "conversation_start":
                 history.clear()
                 preferred_language = None
-                await send_json(websocket, lock, {"type": "conversation_ready", "language": "auto"})
+                requested_model = event.get("model", DEFAULT_LLM_MODEL)
+                if requested_model not in LLM_MODELS:
+                    await send_json(websocket, lock, {"type": "error", "stage": "llm", "message": f"Unknown LLM model: {requested_model}"})
+                    continue
+                selected_model = requested_model
+                await send_json(websocket, lock, {"type": "conversation_ready", "language": "auto", "model": selected_model})
             elif event.get("type") == "conversation_end":
                 history.clear()
                 preferred_language = None
@@ -516,7 +535,7 @@ async def voice_socket(websocket: WebSocket):
                     "stt_final_ms": (time.perf_counter() - ended) * 1000,
                     "audio_peak": turn.peak, "audio_rms": rms,
                 })
-                await process_turn(websocket, lock, turn, history, route)
+                await process_turn(websocket, lock, turn, history, route, selected_model)
                 turn = None
     except WebSocketDisconnect:
         pass

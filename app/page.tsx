@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 type Status = 'connecting' | 'ready' | 'recording' | 'thinking' | 'speaking' | 'error';
 type RouteLanguage = 'auto' | 'en' | 'ar';
+type LlmModel = 'gemma' | 'qwen';
 type Metrics = { speechDuration?: number; firstPartial?: number; sttFinal?: number; ttft?: number; tokensPerSecond?: number; llmTotal?: number; ttsFirstAudio?: number; ttsRealtime?: number; total?: number };
 const emptyMetrics: Metrics = {};
+const llmNames: Record<LlmModel, string> = { gemma: 'Gemma 3 1B', qwen: 'Qwen3-1.7B' };
 
 function Metric({ label, value, unit = 'ms' }: { label: string; value?: number; unit?: string }) {
   const decimal = unit === 'tok/s' || unit === '× realtime';
@@ -22,6 +24,7 @@ export default function Home() {
   const [callActive, setCallActive] = useState(false);
   const [routeLanguage, setRouteLanguage] = useState<RouteLanguage>('auto');
   const [routeConfidence, setRouteConfidence] = useState(0);
+  const [selectedModel, setSelectedModel] = useState<LlmModel>('gemma');
   const socketRef = useRef<WebSocket | null>(null);
   const recordingRef = useRef(false);
   const callActiveRef = useRef(false);
@@ -84,10 +87,12 @@ export default function Home() {
         if (message.data instanceof ArrayBuffer) { void playAudio(message.data); return; }
         const event = JSON.parse(message.data);
         switch (event.type) {
+          case 'hello': if (event.llm?.selected === 'gemma' || event.llm?.selected === 'qwen') setSelectedModel(event.llm.selected); break;
           case 'stt_partial': setTranscript(event.text || 'Listening…'); if (event.stable) { setRouteLanguage(event.language); setRouteConfidence(event.confidence || 0); } setMetrics((m) => ({ ...m, firstPartial: m.firstPartial ?? event.first_partial_ms })); break;
           case 'language_detected': setRouteLanguage(event.language); setRouteConfidence(event.confidence || 0); break;
           case 'stt_final': setTranscript(event.text || 'No speech detected'); setRouteLanguage(event.language || 'auto'); setRouteConfidence(event.confidence || 0); setMetrics((m) => ({ ...m, speechDuration: event.speech_duration_ms, sttFinal: event.stt_final_ms })); setStatus('thinking'); break;
           case 'stt_ignored': setTranscript('Listening for speech…'); setError(''); listenAfterRef.current = performance.now() + 350; setStatus('ready'); break;
+          case 'conversation_ready': if (event.model === 'gemma' || event.model === 'qwen') setSelectedModel(event.model); break;
           case 'llm_token': setAnswer((text) => text + event.delta); setMetrics((m) => ({ ...m, ttft: m.ttft ?? event.ttft_ms })); break;
           case 'llm_done': setMetrics((m) => ({ ...m, tokensPerSecond: event.tokens_per_second, llmTotal: event.total_ms })); break;
           case 'tts_audio': setMetrics((m) => ({ ...m, ttsFirstAudio: m.ttsFirstAudio ?? event.ttfa_ms, ttsRealtime: event.realtime_factor })); break;
@@ -207,7 +212,7 @@ export default function Home() {
       await prepareMicrophone();
       await audioRef.current?.resume();
       callActiveRef.current = true;
-      socket.send(JSON.stringify({ type: 'conversation_start' }));
+      socket.send(JSON.stringify({ type: 'conversation_start', model: selectedModel }));
       noiseFloorRef.current = 0.004;
       setCallActive(true);
       listenAfterRef.current = performance.now() + 250;
@@ -216,7 +221,7 @@ export default function Home() {
       statusRef.current = 'ready';
       setStatus('ready');
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Microphone permission was denied.'); setStatus('error'); }
-  }, [prepareMicrophone]);
+  }, [prepareMicrophone, selectedModel]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => { if (e.code === 'Space' && !e.repeat && !(e.target instanceof HTMLInputElement)) { e.preventDefault(); void toggleCall(); } };
@@ -226,11 +231,19 @@ export default function Home() {
 
   const statusText: Record<Status, string> = { connecting: 'Connecting', ready: 'Ready', recording: 'Listening', thinking: 'Thinking', speaking: 'Speaking', error: 'Needs attention' };
   const routeLabel = routeLanguage === 'ar' ? 'العربية' : routeLanguage === 'en' ? 'English' : 'Auto detect';
-  const llmLabel = routeLanguage === 'ar' ? 'RightNow Arabic 0.5B' : routeLanguage === 'en' ? 'Gemma 3 1B' : 'Gemma + RightNow';
+  const llmLabel = llmNames[selectedModel];
+  const ttsLabel = routeLanguage === 'ar' ? 'Nabra-82M' : routeLanguage === 'en' ? 'Piper Amy' : 'Piper / Nabra';
+  const changeModel = (model: LlmModel) => {
+    if (callActive) return;
+    setSelectedModel(model);
+    setMetrics(emptyMetrics);
+    setAnswer('');
+    setError('');
+  };
   return (
     <main className="shell">
       <header className="topbar"><div className="brand"><span className="brand-mark">V</span><div><strong>VoiceBench</strong><small>LOCAL LATENCY LAB</small></div></div><div className={`connection ${status}`}><i />{callActive && status === 'ready' ? 'Listening' : statusText[status]}</div></header>
-      <section className="hero"><div><p className="eyebrow">BILINGUAL END-TO-END VOICE PIPELINE</p><h1>Hear exactly where<br />the milliseconds go.</h1></div><p className="intro">A local English–Arabic benchmark with partial-STT language routing. Audio never leaves your server.</p></section>
+      <section className="hero"><div><p className="eyebrow">BILINGUAL END-TO-END VOICE PIPELINE</p><h1>Hear exactly where<br />the milliseconds go.</h1></div><div className="hero-side"><p className="intro">A local English–Arabic benchmark with partial-STT language routing. Audio never leaves your server.</p><label className="model-selector" htmlFor="llm-model"><span>LLM under test</span><select id="llm-model" value={selectedModel} disabled={callActive} onChange={(event) => changeModel(event.target.value as LlmModel)}><option value="gemma">Gemma 3 1B · Q4_K_M</option><option value="qwen">Qwen3-1.7B · Q4_K_M</option></select><small>{callActive ? 'End the call to change model' : 'Both models are preloaded on the server'}</small></label></div></section>
       <section className="workspace">
         <div className="conversation">
           <div className="pipeline" aria-label="Active model pipeline">
@@ -248,7 +261,7 @@ export default function Home() {
           <div className="total"><span>End speech → first audio</span><strong>{metrics.total === undefined ? '—' : metrics.total.toFixed(0)}<small>{metrics.total === undefined ? '' : ' ms'}</small></strong><div><i style={{ width: `${Math.min(100, (metrics.total ?? 0) / 10)}%` }} /></div></div>
           <div className="metric-group"><h3><span>STT</span>Moonshine</h3><Metric label="Speech duration" value={metrics.speechDuration} /><Metric label="First partial" value={metrics.firstPartial} /><Metric label="Final after end" value={metrics.sttFinal} /></div>
           <div className="metric-group"><h3><span>LLM</span>{llmLabel}</h3><Metric label="Time to first token" value={metrics.ttft} /><Metric label="Generation speed" value={metrics.tokensPerSecond} unit="tok/s" /><Metric label="Total generation" value={metrics.llmTotal} /></div>
-          <div className="metric-group"><h3><span>TTS</span>Piper</h3><Metric label="Time to first audio" value={metrics.ttsFirstAudio} /><Metric label="Generation speed" value={metrics.ttsRealtime} unit="× realtime" /></div>
+          <div className="metric-group"><h3><span>TTS</span>{ttsLabel}</h3><Metric label="Time to first audio" value={metrics.ttsFirstAudio} /><Metric label="Generation speed" value={metrics.ttsRealtime} unit="× realtime" /></div>
         </aside>
       </section>
       <footer><span>16 kHz PCM · WebSocket</span><span>All inference runs on your server</span></footer>

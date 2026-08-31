@@ -14,7 +14,7 @@ services:
       - models:/models
     restart: "no"
 
-  llama:
+  llama-gemma:
     image: ghcr.io/ggml-org/llama.cpp:server
     command:
       - --model
@@ -26,7 +26,7 @@ services:
       - --ctx-size
       - "4096"
       - --threads
-      - "${LLAMA_EN_THREADS:-4}"
+      - "${GEMMA_THREADS:-4}"
       - --parallel
       - "1"
       - --metrics
@@ -43,11 +43,11 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  llama-ar:
+  llama-qwen:
     image: ghcr.io/ggml-org/llama.cpp:server
     command:
       - --model
-      - /models/llm-ar/gguf/RightNow-Arabic-0.5B-Turbo-q4_k_m.gguf
+      - /models/llm-qwen/Qwen3-1.7B-Q4_K_M.gguf
       - --host
       - 0.0.0.0
       - --port
@@ -55,9 +55,11 @@ services:
       - --ctx-size
       - "4096"
       - --threads
-      - "${LLAMA_AR_THREADS:-4}"
+      - "${QWEN_THREADS:-4}"
       - --parallel
       - "1"
+      - --reasoning-budget
+      - "0"
       - --metrics
     volumes:
       - models:/models:ro
@@ -117,12 +119,13 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      LLAMA_EN_URL: http://llama:8080
-      LLAMA_AR_URL: http://llama-ar:8080
+      GEMMA_URL: http://llama-gemma:8080
+      QWEN_URL: http://llama-qwen:8080
       PIPER_EN_URL: http://piper:5000
       NABRA_URL: http://nabra:8000
-      MODEL_NAME_EN: gemma-3-1b-it
-      MODEL_NAME_AR: RightNow-Arabic-0.5B-Turbo
+      GEMMA_MODEL_NAME: gemma-3-1b-it
+      QWEN_MODEL_NAME: Qwen3-1.7B
+      DEFAULT_LLM_MODEL: "${DEFAULT_LLM_MODEL:-gemma}"
       MAX_TOKENS: "${MAX_TOKENS:-160}"
       MAX_TOKENS_AR: "${MAX_TOKENS_AR:-48}"
       ARABIC_MAX_WORDS: "${ARABIC_MAX_WORDS:-22}"
@@ -137,9 +140,9 @@ services:
     depends_on:
       model-init:
         condition: service_completed_successfully
-      llama:
+      llama-gemma:
         condition: service_healthy
-      llama-ar:
+      llama-qwen:
         condition: service_healthy
       piper:
         condition: service_healthy
