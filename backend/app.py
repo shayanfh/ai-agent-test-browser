@@ -48,6 +48,8 @@ SYSTEM_PROMPTS = {
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "160"))
 MAX_TOKENS_AR = int(os.getenv("MAX_TOKENS_AR", "48"))
 ARABIC_MAX_WORDS = int(os.getenv("ARABIC_MAX_WORDS", "22"))
+HISTORY_MAX_MESSAGES = max(8, int(os.getenv("HISTORY_MAX_MESSAGES", "16")))
+MEMORY_MAX_ITEMS = max(4, int(os.getenv("MEMORY_MAX_ITEMS", "12")))
 ARABIC_BREVITY_RULE = os.getenv(
     "ARABIC_BREVITY_RULE",
     "قاعدة إلزامية: أجب بجملة عربية واحدة قصيرة لا تتجاوز 22 كلمة، واسأل سؤالاً واحداً فقط في كل دور.",
@@ -276,6 +278,39 @@ async def send_json(websocket: WebSocket, lock: asyncio.Lock, payload: dict):
         await websocket.send_json(payload)
 
 
+def remember_utterance(memory: list[str], text: str):
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return
+    normalized = text.casefold().strip(" .،؛؟!?")
+    if any(item.casefold().strip(" .،؛؟!?") == normalized for item in memory):
+        return
+    memory.append(text)
+    del memory[:-MEMORY_MAX_ITEMS]
+
+
+def prompt_with_memory(language: str, memory: list[str]) -> str:
+    if not memory:
+        return SYSTEM_PROMPTS[language]
+    facts = "\n".join(f"{index}. {item}" for index, item in enumerate(memory, 1))
+    if language == "ar":
+        rule = (
+            "\n\nذاكرة المكالمة — هذه عبارات قالها العميل بالفعل:\n"
+            f"{facts}\n"
+            "قواعد إلزامية: راجع الذاكرة قبل الرد. لا تطلب من العميل أي معلومة سبق أن قالها. "
+            "اعتبر الرد القصير إجابة عن سؤالك السابق. علّق على آخر كلامه ثم اسأل فقط عن أول معلومة ناقصة. "
+            "إذا ذكر نوع الساندويتش أو اختياره فلا تسأله عن الساندويتش مرة أخرى."
+        )
+    else:
+        rule = (
+            "\n\nCall memory — the customer already said:\n"
+            f"{facts}\n"
+            "Mandatory rules: review this memory before replying. Never ask again for information already provided. "
+            "Treat a short reply as the answer to your previous question, acknowledge it, and ask only for the next missing detail."
+        )
+    return SYSTEM_PROMPTS[language] + rule
+
+
 def split_tts_chunk(buffer: str, force: bool = False):
     if not buffer.strip():
         return None, ""
@@ -365,7 +400,7 @@ def probable_silence_hallucination(text: str, language: str, rms: float) -> bool
     return normalized in common and rms < 0.022
 
 
-async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn, history: list[dict], route: dict, model_key: str):
+async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn, history: list[dict], memory: list[str], route: dict, model_key: str):
     language = route["language"]
     model = LLM_MODELS[model_key]
     text = route["text"]
@@ -385,9 +420,10 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
         await send_json(websocket, lock, {"type": "stt_ignored", "text": text, "language": language, "reason": "low_energy", "audio_rms": rms, "audio_peak": turn.peak})
         return
 
+    remember_utterance(memory, text)
     if history and history[-1].get("role") == "user":
         history.pop()
-    history[:] = history[-6:]
+    history[:] = history[-HISTORY_MAX_MESSAGES:]
     while history and history[0].get("role") != "user":
         history.pop(0)
     history.append({"role": "user", "content": text})
@@ -402,7 +438,7 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
     try:
         payload = {
             "model": model["api_model"],
-            "messages": [{"role": "system", "content": SYSTEM_PROMPTS[language]}, *history],
+            "messages": [{"role": "system", "content": prompt_with_memory(language, memory)}, *history],
             "stream": True,
             "max_tokens": MAX_TOKENS_AR if language == "ar" else MAX_TOKENS,
             "temperature": 0.5 if language == "ar" else 0.6,
@@ -450,7 +486,7 @@ async def process_turn(websocket: WebSocket, lock: asyncio.Lock, turn: VoiceTurn
             await tts_queue.put(chunk)
         llm_finished = time.perf_counter()
         elapsed = max(0.001, llm_finished - (first_token_at or llm_started))
-        await send_json(websocket, lock, {"type": "llm_done", "language": language, "model": model_key, "total_ms": (llm_finished - llm_started) * 1000, "tokens": token_count, "tokens_per_second": server_tokens_per_second or token_count / elapsed})
+        await send_json(websocket, lock, {"type": "llm_done", "language": language, "model": model_key, "memory_items": len(memory), "total_ms": (llm_finished - llm_started) * 1000, "tokens": token_count, "tokens_per_second": server_tokens_per_second or token_count / elapsed})
         if answer:
             history.append({"role": "assistant", "content": answer})
     except Exception as exc:
@@ -471,6 +507,7 @@ async def voice_socket(websocket: WebSocket):
     # Keep one conversation across route changes, so callers can switch
     # language mid-call without losing the previous order/context.
     history: list[dict] = []
+    memory: list[str] = []
     preferred_language: str | None = None
     selected_model = DEFAULT_LLM_MODEL
     turn: VoiceTurn | None = None
@@ -501,6 +538,7 @@ async def voice_socket(websocket: WebSocket):
             event = json.loads(raw)
             if event.get("type") == "conversation_start":
                 history.clear()
+                memory.clear()
                 preferred_language = None
                 requested_model = event.get("model", DEFAULT_LLM_MODEL)
                 if requested_model not in LLM_MODELS:
@@ -510,6 +548,7 @@ async def voice_socket(websocket: WebSocket):
                 await send_json(websocket, lock, {"type": "conversation_ready", "language": "auto", "model": selected_model})
             elif event.get("type") == "conversation_end":
                 history.clear()
+                memory.clear()
                 preferred_language = None
             elif event.get("type") == "start":
                 if turn:
@@ -535,7 +574,7 @@ async def voice_socket(websocket: WebSocket):
                     "stt_final_ms": (time.perf_counter() - ended) * 1000,
                     "audio_peak": turn.peak, "audio_rms": rms,
                 })
-                await process_turn(websocket, lock, turn, history, route, selected_model)
+                await process_turn(websocket, lock, turn, history, memory, route, selected_model)
                 turn = None
     except WebSocketDisconnect:
         pass

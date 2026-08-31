@@ -66,6 +66,8 @@ Copy `.env.example` to `.env` and adjust:
 - `MAX_TOKENS`: maximum response length; shorter responses reduce total turn time.
 - `MAX_TOKENS_AR`: Arabic generation ceiling (default `48`).
 - `ARABIC_MAX_WORDS`: hard limit applied before Arabic text reaches TTS (default `22`, one sentence maximum).
+- `HISTORY_MAX_MESSAGES`: recent chat messages retained verbatim (default `16`).
+- `MEMORY_MAX_ITEMS`: customer utterances retained separately and injected into the prompt so collected details are not requested again (default `12`).
 - `NABRA_THREADS`: CPU threads assigned to Arabic speech synthesis (default `4`).
 - `NABRA_SPEED`: Nabra speaking speed (default `1.0`).
 - `SYSTEM_PROMPT`: English voice assistant behavior.
